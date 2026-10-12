@@ -1,5 +1,11 @@
-# The mail server. `./mail deploy` writes the .env file next to this one on the server
-# (MAIL_HOST, DOMAIN), so nothing here is specific to one domain.
+# The mail server and its console/API/MCP app. `./mail deploy` writes the .env file next to
+# this one on the server (MAIL_HOST, DOMAIN), so nothing here is specific to one domain.
+networks:
+  mailnet:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
 services:
   mailserver:
     image: ghcr.io/docker-mailserver/docker-mailserver:16.0.1
@@ -32,3 +38,40 @@ services:
       timeout: 3s
       retries: 0
     mem_limit: 700m
+    networks:
+      mailnet:
+        ipv4_address: 172.31.250.2
+        # the app reaches the mail server under its public name, so TLS checks pass
+        aliases: ["${MAIL_HOST}"]
+
+  app:
+    build: ./app
+    image: mailapp:local
+    container_name: mailapp
+    env_file: ./secrets/app.env        # APP_SECRET_KEY, created by ./mail deploy
+    environment:
+      MAIL_HOST: ${MAIL_HOST}
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "443:8443"   # web console, REST API and MCP (HTTPS)
+    volumes:
+      - ./data/app/:/data/                 # the app's SQLite database
+      - ./data/config/:/mailconfig/        # mailbox and alias files it manages
+      - ./data/mail-data/:/maildata/       # only to remove the mail of deleted mailboxes
+      - ./data/certs/:/certs/:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]               # remove mail folders owned by the mail server's user
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 300m
+    restart: always
+    depends_on: [mailserver]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=ssl._create_unverified_context(),timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    networks:
+      mailnet:
+        ipv4_address: 172.31.250.10

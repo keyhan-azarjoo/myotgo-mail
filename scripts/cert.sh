@@ -44,9 +44,9 @@ if ! cmp -s "$crt" "$CERT_DIR/$MAIL_HOST.crt"; then
   install -m 644 "$crt" "$CERT_DIR/$MAIL_HOST.crt"
   install -m 600 "$key" "$CERT_DIR/$MAIL_HOST.key"
   echo "certificate updated"
-  if docker ps --format '{{.Names}}' | grep -qx mailserver; then
-    docker compose restart mailserver
-  fi
+  for c in mailserver mailapp; do
+    if docker ps --format '{{.Names}}' | grep -qx "$c"; then docker restart "$c" >/dev/null; fi
+  done
 else
   echo "certificate unchanged"
 fi

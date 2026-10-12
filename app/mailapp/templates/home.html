@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="head">
+  <h1>Your mailboxes</h1>
+  <a class="button" href="/connect">Connect Outlook, Claude or the API</a>
+</div>
+{% if not sess.totp_enabled %}
+<div class="notice warn">Two-step verification is off for your account. <a href="/security">Turn it on</a> — it's needed to use MCP and the API{% if not require_two_step %} once your admin requires it{% endif %}.</div>
+{% endif %}
+{% if mailboxes %}
+<table>
+  <thead><tr><th>Mailbox</th><th>Your access</th><th>Aliases</th><th>Console</th></tr></thead>
+  <tbody>
+  {% for m in mailboxes %}
+  <tr>
+    <td><strong>{{ m.address }}</strong></td>
+    <td>{% for p in m.permissions %}<span class="pill {{ p }}">{{ p }}</span>{% endfor %}</td>
+    <td class="muted">{{ m.aliases|join(', ') or '—' }}</td>
+    <td>{% if m.linked %}<span class="pill ok">ready</span>{% else %}<span class="pill warn">not linked</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No mailboxes yet. {% if sess.role == 'admin' %}<a href="/admin/mailboxes">Create one</a>.{% else %}Ask an administrator for access.{% endif %}</div>
+{% endif %}
+<p class="muted small">read = search and read · send = send, reply, forward, drafts · organize = flag, move, delete, folders</p>
+{% endblock %}

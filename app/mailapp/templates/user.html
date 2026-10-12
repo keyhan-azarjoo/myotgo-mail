@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ user.email }} · {{ app_name }}{% endblock %}
+{% block content %}
+<p><a href="/admin/users">← Users</a></p>
+<h1>{{ user.email }}</h1>
+
+<div class="cols">
+<section class="box">
+  <h2>Account</h2>
+  <form method="post" action="/admin/users/{{ user.id }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Name<input name="name" value="{{ user.name }}" maxlength="100"></label>
+    <label>Role<select name="role"><option value="user" {{ 'selected' if user.role == 'user' }}>User</option><option value="admin" {{ 'selected' if user.role == 'admin' }}>Admin (everything)</option></select></label>
+    <label class="check"><input type="checkbox" name="disabled" value="1" {{ 'checked' if user.disabled }}> Disabled (can't sign in; tokens stop working)</label>
+    <button class="primary">Save</button>
+  </form>
+</section>
+
+<section class="box">
+  <h2>Sign-in</h2>
+  <p>Two-step verification: {% if user.two_step %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %}</p>
+  <div class="row">
+    <form method="post" action="/admin/users/{{ user.id }}/reset-password"><input type="hidden" name="csrf" value="{{ csrf }}"><button>New temporary password</button></form>
+    {% if user.two_step %}<form method="post" action="/admin/users/{{ user.id }}/reset-two-step"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Reset two-step</button></form>{% endif %}
+  </div>
+  <p class="muted small">Both sign the person out everywhere and cancel their tokens.</p>
+  {% if user.id != sess.user_id %}
+  <form method="post" action="/admin/users/{{ user.id }}/delete" class="danger-zone">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="danger">Delete account</button>
+  </form>
+  {% endif %}
+</section>
+</div>
+
+<section class="box">
+  <h2>Mailbox permissions</h2>
+  {% if user.role == 'admin' %}<p class="muted">Admins can use every mailbox. These settings apply if the role changes to user.</p>{% endif %}
+  <form method="post" action="/admin/users/{{ user.id }}/grants">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <table>
+      <thead><tr><th>Mailbox</th><th>Read</th><th>Send</th><th>Organize</th></tr></thead>
+      <tbody>
+      {% for m in mailboxes %}{% set g = grants.get(m) %}
+      <tr>
+        <td>{{ m }}</td>
+        <td><input type="checkbox" name="read:{{ m }}" value="1" {{ 'checked' if g and g.read }} aria-label="read {{ m }}"></td>
+        <td><input type="checkbox" name="send:{{ m }}" value="1" {{ 'checked' if g and g.send }} aria-label="send {{ m }}"></td>
+        <td><input type="checkbox" name="organize:{{ m }}" value="1" {{ 'checked' if g and g.organize }} aria-label="organize {{ m }}"></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted small">Read: search and read mail · Send: send, reply, forward, drafts · Organize: flag, move, delete, folders</p>
+    <button class="primary">Save permissions</button>
+  </form>
+</section>
+{% endblock %}

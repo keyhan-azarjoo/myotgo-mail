@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Security · {{ app_name }}{% endblock %}
+{% block main_class %}page narrowpage{% endblock %}
+{% block content %}
+<h1>Account security</h1>
+{% if required %}<div class="notice warn">Your administrator requires two-step verification. Set it up to continue.</div>{% endif %}
+
+<section class="box">
+  <h2>Two-step verification</h2>
+  {% if recovery_codes %}
+    <div class="notice ok">Two-step verification is on.</div>
+    <p><strong>Recovery codes.</strong> Each works once if you lose your phone. Save them now: they won't be shown again.</p>
+    <div class="codes">{% for c in recovery_codes %}<code>{{ c }}</code>{% endfor %}</div>
+    <p><a class="button" href="/">Continue</a></p>
+  {% elif email_setup %}
+    <p>We emailed a 6-digit code to <strong>{{ sent_to }}</strong>.</p>
+    <form method="post" action="/security/two-step/email/confirm" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Code from the email<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+      <button class="primary">Turn on</button>
+    </form>
+  {% elif setup %}
+    <ol class="steps">
+      <li>Open an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Authy…).</li>
+      <li>Scan this code, or type the key by hand.</li>
+    </ol>
+    <img class="qr" src="{{ qr }}" alt="QR code for your authenticator app">
+    <p class="muted small">Key: <code class="select">{{ secret }}</code></p>
+    <form method="post" action="/security/two-step/confirm" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>3. Enter the 6-digit code it shows<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+      <button class="primary">Turn on</button>
+    </form>
+  {% elif sess.totp_enabled %}
+    <p><span class="pill ok">on</span> Signing in, connecting Claude and creating API tokens ask for a code
+      {% if sess.two_step_method == 'email' %}we email to <strong>{{ sess.email }}</strong>{% else %}from your authenticator app{% endif %}.</p>
+    <form method="post" action="/security/two-step/disable" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Code<input name="code" inputmode="numeric" required></label>
+      <button class="danger">Turn off</button>
+    </form>
+  {% else %}
+    <p><span class="pill warn">off</span> Protect your account with a one-time code in addition to your password. Choose how you get it:</p>
+    <div class="row">
+      <form method="post" action="/security/two-step/email/start">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="primary">Email me codes</button>
+      </form>
+      <form method="post" action="/security/two-step/start">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button>Use an authenticator app</button>
+      </form>
+    </div>
+    <p class="muted small">Email codes go to {{ sess.email }}. An authenticator app (Google/Microsoft Authenticator, 1Password…) also works without email.</p>
+  {% endif %}
+</section>
+
+<section class="box">
+  <h2>Password</h2>
+  <p><a class="button" href="/password">Change password</a></p>
+</section>
+{% endblock %}

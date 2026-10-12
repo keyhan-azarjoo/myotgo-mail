@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Mail setup · {{ app_name }}{% endblock %}
+{% block content %}
+<h1>Mail setup</h1>
+<div class="cols">
+<section class="box">
+  <h2>New mailbox</h2>
+  <form method="post" action="/admin/mailboxes" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Address<span class="suffix"><input name="local" placeholder="anna" pattern="[A-Za-z0-9._+\-]+" required>@{{ domain }}</span></label>
+    <button class="primary">Create</button>
+  </form>
+</section>
+<section class="box">
+  <h2>New alias</h2>
+  <form method="post" action="/admin/aliases" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Alias<span class="suffix"><input name="alias" placeholder="sales" required>@{{ domain }}</span></label>
+    <label>Forwards to<input type="email" name="target" placeholder="anna@{{ domain }}" required></label>
+    <button class="primary">Add</button>
+  </form>
+</section>
+</div>
+
+<h2>Mailboxes</h2>
+<table>
+  <thead><tr><th>Address</th><th>Aliases</th><th>People with access</th><th>Console</th><th></th></tr></thead>
+  <tbody>
+  {% for m in mailboxes %}
+  <tr>
+    <td><strong>{{ m.address }}</strong></td>
+    <td class="small">{{ m.aliases|join(', ') or '—' }}</td>
+    <td class="small">{{ m.users_with_access|join(', ') or '—' }}</td>
+    <td>{% if m.linked %}<span class="pill ok">linked</span>{% else %}
+      <form method="post" action="/admin/mailboxes/{{ m.address }}/link" class="inline tight">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="password" name="password" placeholder="mailbox password" required aria-label="mailbox password">
+        <button>Link</button>
+      </form>{% endif %}</td>
+    <td class="actions">
+      <details><summary>More</summary>
+        <form method="post" action="/admin/mailboxes/{{ m.address }}/reset"><input type="hidden" name="csrf" value="{{ csrf }}"><button>New password</button></form>
+        <form method="post" action="/admin/mailboxes/{{ m.address }}/delete" class="stack">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label class="small">Type the address to delete it and all its mail<input name="confirm" required></label>
+          <button class="danger">Delete mailbox</button>
+        </form>
+      </details>
+    </td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="empty">No mailboxes yet.</td></tr>{% endfor %}
+  </tbody>
+</table>
+
+<h2>Aliases</h2>
+<table>
+  <thead><tr><th>Alias</th><th>Forwards to</th><th></th></tr></thead>
+  <tbody>
+  {% for a in aliases %}{% for t in a.targets %}
+  <tr><td>{{ a.alias }}</td><td>{{ t }}</td>
+    <td><form method="post" action="/admin/aliases/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="alias" value="{{ a.alias }}"><input type="hidden" name="target" value="{{ t }}"><button class="link danger">Remove</button></form></td></tr>
+  {% endfor %}{% else %}<tr><td colspan="3" class="empty">No aliases.</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Users · {{ app_name }}{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<section class="box">
+  <h2>Create an account</h2>
+  <form method="post" action="/admin/users" class="grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Email (user name)<input type="email" name="email" placeholder="anna@{{ domain }}" required></label>
+    <label>Name<input name="name" placeholder="Anna Smith" maxlength="100"></label>
+    <label>Role<select name="role"><option value="user">User</option><option value="admin">Admin</option></select></label>
+    <div><button class="primary">Create account</button></div>
+  </form>
+</section>
+<table>
+  <thead><tr><th>User</th><th>Role</th><th>Two-step</th><th>Mailbox access</th><th>Last sign-in</th></tr></thead>
+  <tbody>
+  {% for u in users %}
+  <tr class="{{ 'off' if u.disabled }}">
+    <td><a href="/admin/users/{{ u.id }}"><strong>{{ u.email }}</strong></a>{% if u.name %}<br><span class="muted small">{{ u.name }}</span>{% endif %}{% if u.disabled %} <span class="pill warn">disabled</span>{% endif %}</td>
+    <td><span class="pill {{ 'admin' if u.role == 'admin' }}">{{ u.role }}</span></td>
+    <td>{% if u.two_step %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %}</td>
+    <td class="small">{% if u.role == 'admin' %}<span class="muted">all mailboxes</span>{% else %}{% for g in u.grants %}{{ g.mailbox }}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">none</span>{% endfor %}{% endif %}</td>
+    <td class="muted small">{{ fmt(u.last_login_at) if u.last_login_at else 'never' }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

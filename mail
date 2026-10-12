@@ -25,6 +25,14 @@ Mailboxes
   list                         mailboxes and aliases
   outlook <address>            settings to type into Outlook / any mail app
 
+Console, REST API and MCP  (https://MAIL_HOST)
+  app-admin <email>            create an admin login for the console; prints a temporary password
+  app-link <address>           let the console use an existing mailbox (password from SECRETS_DIR)
+  app-reset-two-step <email>   remove two-step verification from a login (lost phone)
+  app-unblock <ip>             clear the failed sign-in limit for a network address
+  app-test                     run the console/API/MCP/OAuth test suite against the server
+  app-test-claude              let Claude Code use the MCP server for real, then check its work
+
 Running it
   status                       services, mail queue, disk, certificate
   logs                         follow the mail log (Ctrl+C to stop)
@@ -90,6 +98,35 @@ EOF
     ip=${1:?give the IP address}
     for j in dovecot postfix custom; do remote "docker exec mailserver fail2ban-client set $j unbanip $ip" 2>/dev/null || true; done
     echo "unbanned $ip" ;;
+  app-admin)
+    remote "docker exec mailapp python -m mailapp.cli create-admin '${1:?give the admin email}'" ;;
+  app-link)
+    a=${1:?give the mailbox address}
+    [[ -f $SECRETS_DIR/$a.txt ]] || { echo "no saved password in $SECRETS_DIR/$a.txt" >&2; exit 1; }
+    remote "docker exec -i mailapp python -m mailapp.cli link-mailbox '$a'" < "$SECRETS_DIR/$a.txt" ;;
+  app-unblock)
+    remote "docker exec mailapp python -m mailapp.cli unblock-ip '${1:?give the IP address}'" ;;
+  app-test|app-test-claude)
+    venv=$HERE/.venv-test
+    # the suite fails sign-ins on purpose; start each run with a clean limit for this network
+    myip=$(curl -s -m 10 https://api.ipify.org || true)
+    [[ -n $myip ]] && remote "docker exec mailapp python -m mailapp.cli unblock-ip '$myip'" >/dev/null
+    [[ -x $venv/bin/python ]] || { python3 -m venv "$venv" && "$venv/bin/pip" -q install -r "$HERE/app/tests/requirements.txt"; }
+    # a throwaway admin whose login is also a mailbox, so the tests can read its emailed sign-in codes
+    who="e2e-admin-$(openssl rand -hex 3)@$DOMAIN"
+    "$HERE/scripts/account.sh" add "$who" >/dev/null
+    out=$(remote "docker exec mailapp python -m mailapp.cli create-admin '$who'")
+    pw=$(sed -n 's/^temporary password: //p' <<<"$out")
+    status=0
+    BASE_URL="https://$MAIL_HOST" DOMAIN="$DOMAIN" ADMIN_EMAIL="$who" ADMIN_PASSWORD="$pw" \
+      ADMIN_MAILBOX_PASSWORD="$(cat "$SECRETS_DIR/$who.txt")" \
+      bash -c 'if [[ $0 == app-test ]]; then exec "$1/bin/python" -m pytest -q "$2/app/tests/test_live.py" "${@:3}";
+               else exec "$1/bin/python" "$2/app/tests/claude_check.py"; fi' "$cmd" "$venv" "$HERE" "$@" || status=$?
+    remote "docker exec mailapp python -m mailapp.cli delete-user '$who'" >/dev/null
+    dms email del -y "$who" >/dev/null 2>&1; rm -f "$SECRETS_DIR/$who.txt"
+    exit $status ;;
+  app-reset-two-step)
+    remote "docker exec mailapp python -m mailapp.cli reset-two-step '${1:?give the email}'" ;;
   ssh)
     ssh "${SSH_OPTS[@]/BatchMode=yes/BatchMode=no}" -t "$SSH_TARGET" "cd '$REMOTE_DIR'; exec bash -l" ;;
   *)

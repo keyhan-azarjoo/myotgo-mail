@@ -6,10 +6,22 @@ source "$(dirname "$0")/common.sh"
 
 newpass() {
   local p
-  p=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)
+  p=$(python3 -c 'import secrets,string;a=string.ascii_letters+string.digits;print("".join(secrets.choice(a) for _ in range(24)))')
   mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"
   (umask 077 && printf '%s\n' "$p" >"$SECRETS_DIR/$1.txt")
   echo "$p"
+}
+
+# Keep the console's stored copy of the mailbox password in step (if the console runs).
+link_app() {
+  if remote "docker ps --format '{{.Names}}' | grep -qx mailapp"; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if printf '%s\n' "$2" | remote "docker exec -i mailapp python -m mailapp.cli link-mailbox '$1'" >/dev/null 2>&1; then
+        echo "console: linked $1"; return; fi
+      sleep 3
+    done
+    echo "console: couldn't link $1 yet; run ./mail app-link $1 in a minute" >&2
+  fi
 }
 
 need_addr() {
@@ -23,6 +35,7 @@ case "${1:-}" in
     p=$(newpass "$2")
     dms email add "$2" "$p"
     echo "created $2"
+    link_app "$2" "$p"
     echo "password: $p   (also saved in $SECRETS_DIR/$2.txt)"
     if [[ $first == 0 && -n ${DEFAULT_ALIASES:-} ]]; then
       IFS=, read -ra names <<<"$DEFAULT_ALIASES"
@@ -33,6 +46,7 @@ case "${1:-}" in
     need_addr "${2:-}"
     p=$(newpass "$2")
     dms email update "$2" "$p"
+    link_app "$2" "$p"
     echo "new password for $2: $p   (also saved in $SECRETS_DIR/$2.txt)"
     ;;
   del)

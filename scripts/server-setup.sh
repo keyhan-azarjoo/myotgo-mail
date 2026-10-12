@@ -28,9 +28,9 @@ if (( mem_mb < 2048 )) && ! swapon --show | grep -q .; then
   echo vm.swappiness=10 > /etc/sysctl.d/90-swappiness.conf && sysctl -q vm.swappiness=10
 fi
 
-echo "== firewall: SSH + mail ports"
+echo "== firewall: SSH, mail ports and HTTPS (console, API, MCP)"
 ufw allow 22/tcp >/dev/null
-for p in 25 465 587 993; do ufw allow "$p/tcp" >/dev/null; done
+for p in 25 443 465 587 993; do ufw allow "$p/tcp" >/dev/null; done
 ufw --force enable >/dev/null
 
 echo "== SSH: key login only"

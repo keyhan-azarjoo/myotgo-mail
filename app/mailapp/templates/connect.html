@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Connect · {{ app_name }}{% endblock %}
+{% block content %}
+<h1>Connect</h1>
+
+<section class="box">
+  <h2>Claude (MCP)</h2>
+  <p>Server address: <code class="select">{{ mcp_url }}</code></p>
+  <h3>Claude Code</h3>
+  <pre class="select">claude mcp add --transport http mail {{ mcp_url }}</pre>
+  <p class="muted small">Then run <code>/mcp</code> in Claude Code and choose <em>Authenticate</em>: a browser opens, you sign in here
+  (with your two-step code) and approve. Or use a token: <code>--header "Authorization: Bearer mm_pat_…"</code>.</p>
+  <h3>Claude Desktop / claude.ai</h3>
+  <p class="muted small">Settings → Connectors → Add custom connector → paste the server address → Connect, then sign in here.</p>
+</section>
+
+<section class="box">
+  <h2>REST API</h2>
+  <p>Base address: <code class="select">{{ api_url }}</code> · send <code>Authorization: Bearer &lt;token&gt;</code> (create one under <a href="/tokens">API &amp; MCP</a>).</p>
+  <pre class="select">curl -H "Authorization: Bearer $TOKEN" {{ api_url }}/mailboxes
+curl -H "Authorization: Bearer $TOKEN" "{{ api_url }}/mailboxes/you@{{ domain }}/messages?folder=INBOX&amp;unread=true"</pre>
+  <p class="muted small">Full description: <a href="/api/v1/openapi.json">openapi.json</a></p>
+</section>
+
+<section class="box">
+  <h2>Outlook and other mail apps</h2>
+  <table class="kv">
+    <tr><th>Account type</th><td>IMAP</td></tr>
+    <tr><th>User name</th><td>the full mailbox address</td></tr>
+    <tr><th>Incoming (IMAP)</th><td>{{ mail_host }} · port 993 · SSL/TLS</td></tr>
+    <tr><th>Outgoing (SMTP)</th><td>{{ mail_host }} · port 465 · SSL/TLS (or 587 · STARTTLS)</td></tr>
+  </table>
+</section>
+{% endblock %}

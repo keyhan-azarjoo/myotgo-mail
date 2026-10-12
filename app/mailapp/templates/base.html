@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="{% block body_class %}{% endblock %}">
+{% if sess and sess.mfa_ok or (sess and not sess.totp_enabled) %}
+<header class="top">
+  <a class="brand" href="/"><span class="logo">✉</span> {{ app_name }}</a>
+  <nav>
+    <a href="/" class="{{ 'on' if request.url.path == '/' }}">Mailboxes</a>
+    {% if sess.role == 'admin' %}
+    <a href="/admin/users" class="{{ 'on' if request.url.path.startswith('/admin/users') }}">Users</a>
+    <a href="/admin/mailboxes" class="{{ 'on' if request.url.path.startswith('/admin/mailboxes') }}">Mail setup</a>
+    <a href="/admin/audit" class="{{ 'on' if request.url.path.startswith('/admin/audit') }}">Activity</a>
+    <a href="/admin/settings" class="{{ 'on' if request.url.path.startswith('/admin/settings') }}">Settings</a>
+    {% endif %}
+    <a href="/tokens" class="{{ 'on' if request.url.path.startswith('/tokens') }}">API &amp; MCP</a>
+    <a href="/connect" class="{{ 'on' if request.url.path.startswith('/connect') }}">Connect</a>
+  </nav>
+  <div class="me">
+    <a href="/security" title="Account security">{{ sess.email }}</a>
+    <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Sign out</button></form>
+  </div>
+</header>
+{% endif %}
+<main class="{% block main_class %}page{% endblock %}">
+  {% if ok %}<div class="notice ok">{{ ok }}</div>{% endif %}
+  {% if error %}<div class="notice err">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

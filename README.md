@@ -4,6 +4,9 @@ Run your own email server for your domain (`you@yourcompany.com`) on a small ren
 with **as many mailboxes as you like and no per-user fees**. You keep using Outlook, Apple Mail,
 Thunderbird or your phone's mail app, exactly as with Google Workspace, Microsoft 365 or Zoho.
 
+It also comes with a **web console, a REST API and an MCP server**, so people and AI assistants
+such as Claude can read, search, send and organize mail, each with exactly the access an admin gives them.
+
 ```bash
 ./mail init           # create your settings file
 ./mail server-setup   # prepare a fresh server
@@ -23,6 +26,7 @@ protection, backups, tests and the steps to move an existing domain over safely.
 - [Set it up, step by step](#set-it-up-step-by-step)
 - [Move an existing domain (Zoho, Google, Microsoft…)](#move-an-existing-domain-from-zoho-google-microsoft)
 - [Add the mailbox to Outlook and other apps](#add-the-mailbox-to-outlook-and-other-apps)
+- [Console, REST API and MCP server (AI access)](#console-rest-api-and-mcp-server-ai-access)
 - [Everyday commands](#everyday-commands)
 - [Troubleshooting](#troubleshooting)
 - [Security](#security)
@@ -43,7 +47,9 @@ protection, backups, tests and the steps to move an existing domain over safely.
 | Backups | Nightly, last 7 kept on the server |
 | Tests | One command checks 12 things end to end, including a real message to Gmail |
 | Server size | Runs on 1 CPU / 1 GB RAM (it uses about 250 MB) |
-| Interface | None on purpose: commands for the admin, normal mail apps for everyone else |
+| Web console | Sign-in with two-step verification; admins create users, mailboxes and aliases and set who can read, send or organize each mailbox |
+| REST API | `/api/v1`: search, read, send, reply, forward, drafts, flags, folders, admin, with scoped tokens |
+| MCP server | 30 tools for AI assistants (Claude and others), with OAuth sign-in or tokens |
 
 ## How it works
 
@@ -97,6 +103,8 @@ the setup below is DNS records: the server itself is the easy part.
 | Your computer, this folder | Scripts, `mail.conf` (your settings, never committed) |
 | Your computer, `SECRETS_DIR` | Mailbox passwords, DNS backups |
 | Server, `REMOTE_DIR/data/` | Mailboxes, accounts (hashed passwords), DKIM key, certificate |
+| Server, `REMOTE_DIR/data/app/` | The console's SQLite database (users, permissions, tokens, activity log) |
+| Server, `REMOTE_DIR/secrets/app.env` | The key that encrypts stored mailbox passwords |
 | Server, `/var/backups/mailserver/` | Nightly backups (last 7) |
 
 ## What you need
@@ -278,6 +286,130 @@ settings by itself when you type the server name `mx.yourcompany.com`.
 > To send from a second address in the same Outlook, add it as its own account and pick it in the
 > **From** field when you write the email.
 
+## Console, REST API and MCP server (AI access)
+
+`./mail deploy` also starts a second, small container: one HTTPS service at `https://mx.yourcompany.com`
+with three faces, all backed by **one SQLite database** and the same permission rules.
+
+| | Address | Who uses it |
+|---|---|---|
+| Web console | `https://mx.yourcompany.com` | people: sign in, manage users, mailboxes, aliases, tokens |
+| REST API | `https://mx.yourcompany.com/api/v1` | scripts and programs (`Authorization: Bearer <token>`) |
+| MCP server | `https://mx.yourcompany.com/mcp` | AI assistants such as Claude (OAuth sign-in, or a token) |
+
+### First admin
+
+```bash
+./mail add no-reply@yourcompany.com      # the mailbox that sends sign-in codes
+./mail add you@yourcompany.com           # your own mailbox (if you haven't yet)
+./mail app-admin you@yourcompany.com     # your console login; prints a temporary password
+```
+
+Open `https://mx.yourcompany.com`, sign in, choose your own password, then turn on two-step verification
+(**Email me codes** or an authenticator app). Only admins create accounts; there is no public sign-up.
+
+### Who can do what
+
+| Role / permission | Allows |
+|---|---|
+| **admin** | everything: users, mailboxes, aliases, every mailbox, the activity log, settings |
+| **user** + mailbox permission **read** | list folders, search, read messages and download attachments |
+| **send** | send, reply, forward, save drafts (only as that mailbox or its aliases) |
+| **organize** | mark read/unread and flagged, move, delete, create/rename/delete folders |
+
+An admin sets these per user and per mailbox (*Users* → a user → *Mailbox permissions*). A user's
+console login doesn't have to be a mailbox. Every token or app connection is limited further by the
+permissions chosen when it was created (`mail.read`, `mail.send`, `mail.organize`, `admin`), so an AI
+assistant can never do more than the person who connected it.
+
+### Connect Claude
+
+**Claude Code:**
+
+```bash
+claude mcp add --transport http mail https://mx.yourcompany.com/mcp
+```
+
+Then type `/mcp` in Claude Code and choose *Authenticate*: your browser opens the console's sign-in page.
+Sign in with your password and two-step code, then click *Allow*. Claude now sees tools such as
+`search_emails`, `read_email`, `send_email`, `reply_email`, `save_draft`, `move_emails` and, for admins,
+`admin_create_mailbox` and others. Ask it things like *"summarize unread mail in support@ and draft replies"*.
+
+**Claude Desktop / claude.ai:** Settings → Connectors → *Add custom connector* → paste
+`https://mx.yourcompany.com/mcp` → *Connect* → sign in and allow.
+
+**With a token instead** (scripts, other MCP clients): console → *API & MCP* → *Create token*, then
+`--header "Authorization: Bearer mm_pat_…"`.
+
+Connected apps are listed under *API & MCP*, where you can revoke them at any time.
+
+### MCP tools
+
+| Mail | Organize | Admin |
+|---|---|---|
+| `whoami`, `list_mailboxes`, `list_folders` | `mark_emails` (read, flagged) | `admin_list_users`, `admin_create_user`, `admin_update_user` |
+| `search_emails` (text, from, to, subject, dates, unread, flagged) | `move_emails`, `delete_emails` | `admin_set_permissions`, `admin_reset_user_password`, `admin_delete_user` |
+| `read_email`, `download_attachment` | `create_folder`, `rename_folder`, `delete_folder` | `admin_list_mailboxes`, `admin_create_mailbox`, `admin_reset_mailbox_password`, `admin_delete_mailbox` |
+| `send_email` (cc, bcc, html, attachments, send as alias) | | `admin_list_aliases`, `admin_create_alias`, `admin_delete_alias` |
+| `reply_email`, `forward_email`, `save_draft` | | `admin_audit_log` |
+
+### REST API
+
+```bash
+TOKEN=mm_pat_...        # console → API & MCP → Create token
+API=https://mx.yourcompany.com/api/v1
+curl -H "Authorization: Bearer $TOKEN" $API/mailboxes
+curl -H "Authorization: Bearer $TOKEN" "$API/mailboxes/support@yourcompany.com/messages?unread=true&limit=10"
+curl -H "Authorization: Bearer $TOKEN" "$API/mailboxes/support@yourcompany.com/messages/42"
+curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"to":["anna@example.com"],"subject":"Hello","text":"Hi Anna"}' \
+     $API/mailboxes/support@yourcompany.com/send
+```
+
+| Method and path | Does |
+|---|---|
+| `GET /me`, `GET /mailboxes` | who you are; mailboxes you can use |
+| `GET/POST /mailboxes/{m}/folders`, `PATCH/DELETE /mailboxes/{m}/folders/{name}` | folders |
+| `GET /mailboxes/{m}/messages?folder=&q=&from=&to=&subject=&since=&before=&unread=&flagged=&limit=&offset=` | search |
+| `GET /mailboxes/{m}/messages/{uid}?folder=&html=&mark_read=` | read one message |
+| `GET /mailboxes/{m}/messages/{uid}/attachments/{i}` | download an attachment |
+| `POST /mailboxes/{m}/send`, `…/messages/{uid}/reply`, `…/messages/{uid}/forward`, `…/drafts` | write |
+| `POST /mailboxes/{m}/messages/flags`, `…/move`, `…/delete` | organize |
+| `/admin/users`, `/admin/users/{id}/grants`, `/admin/mailboxes`, `/admin/aliases`, `/admin/audit` | administration |
+
+The full description is at `/api/v1/openapi.json`.
+
+### How the console is secured
+
+- **Passwords:** Argon2id hashes; at least 12 characters; temporary passwords must be changed at first sign-in.
+- **Two-step verification:** a 6-digit code by **email** (sent from `no-reply@`) or from an **authenticator app**,
+  plus 10 single-use recovery codes. Each code works once; email codes expire in 10 minutes and a new code
+  cancels the previous one. *Settings → Require two-step verification* makes it mandatory for everyone.
+  When it's on, API and MCP tokens only work if they were issued after a two-step check.
+- **Sign-in limits:** 5 wrong passwords lock an account for 15 minutes; 30 failed sign-ins from one network in
+  15 minutes block it (`./mail app-unblock <ip>`); code attempts and code emails are rate limited.
+- **Sessions:** `__Host-` cookies (Secure, HttpOnly, SameSite=Strict), new session id at every sign-in,
+  30-minute idle and 12-hour maximum lifetime, CSRF token on every form.
+- **Pages:** strict Content-Security-Policy (no inline scripts), HSTS, no framing, no referrer, all output escaped.
+- **Tokens:** shown once and stored only as SHA-256 hashes; scoped; expiring; revocable; 600 requests/minute.
+- **OAuth for MCP:** OAuth 2.1 with PKCE (S256), dynamic client registration (https or localhost redirect
+  addresses only), consent page with the app's name and redirect host, one-hour access tokens, rotating refresh
+  tokens. A reused code or refresh token cancels the whole sign-in. Tokens are bound to this server.
+- **Mailbox access:** the app signs in to each mailbox like a mail app does (passwords encrypted with AES-256-GCM
+  using a key kept only on the server), so the mail server's own rules (no sending as someone else, DKIM
+  signing, spam checks) still apply.
+- **Container:** read-only filesystem, every Linux capability dropped except one, no privilege escalation.
+- **Activity log:** sign-ins, failures, sends, deletes and every admin change, with time and IP (*Activity*).
+
+### Testing it
+
+```bash
+./mail app-test          # 25 end-to-end tests: console, REST API, all MCP tools, OAuth, security rules
+./mail app-test-claude   # lets Claude Code use the MCP server for real, then checks the results
+```
+
+Both create their own throwaway admin, mailboxes and users and remove them afterwards.
+
 ## Everyday commands
 
 ```text
@@ -296,6 +428,11 @@ settings by itself when you type the server name `mx.yourcompany.com`.
 ./mail unban 198.51.100.7                unblock an IP after wrong passwords
 ./mail ssh                               shell on the server
 ./mail deploy                            apply changes / update
+
+./mail app-admin you@yourcompany.com     console admin login (prints a temporary password)
+./mail app-link support@yourcompany.com  let the console use a mailbox created before the console existed
+./mail app-reset-two-step you@…          remove two-step from a login (lost phone)
+./mail app-unblock 198.51.100.7          clear the failed sign-in limit for a network
 ```
 
 **Updating** docker-mailserver: change the version in `compose.yaml`, then `./mail deploy`.
@@ -329,8 +466,8 @@ backup with `tar --numeric-owner -xzf /var/backups/mailserver/mail-<date>.tar.gz
 
 ## Limits
 
-- **No webmail or admin web page**: you use mail apps, and the admin uses `./mail`. A webmail such as
-  Roundcube can be added later as another container if you need one.
+- **No webmail**: the web console manages users and access but doesn't show mail; people use mail apps,
+  and programs or AI assistants use the API or MCP.
 - **No antivirus scanning** (ClamAV needs about 1.5 GB more RAM). Rspamd still blocks a lot of malicious mail.
 - **One server**: if it is down, other servers keep your incoming mail and retry for several days, so it
   arrives once you're back.
@@ -349,7 +486,8 @@ backup with `tar --numeric-owner -xzf /var/backups/mailserver/mail-<date>.tar.gz
 | `scripts/deploy.sh` | installs/updates on the server |
 | `scripts/cert.sh`, `scripts/backup.sh` | run on the server by cron |
 | `scripts/account.sh`, `scripts/dns.py` | mailboxes and DNS |
-| `tests/check.py` | end-to-end test |
+| `tests/check.py` | end-to-end test of the mail server |
+| `app/` | console, REST API and MCP server (Python, FastAPI, MCP SDK); `app/tests/` its end-to-end tests |
 
 ## Credits
 

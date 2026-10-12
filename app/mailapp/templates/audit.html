@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Activity · {{ app_name }}{% endblock %}
+{% block content %}
+<h1>Activity</h1>
+<table class="small">
+  <thead><tr><th>Time (UTC)</th><th>Who</th><th>What</th><th>On</th><th>Details</th><th>IP</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr class="{{ 'bad' if 'failed' in r.action or 'bad' in r.action }}"><td class="nowrap">{{ fmt(r.ts) }}</td><td>{{ r.actor or '' }}</td><td><code>{{ r.action }}</code></td><td>{{ r.target or '' }}</td><td class="muted detail">{{ r.detail or '' }}</td><td class="muted">{{ r.ip or '' }}</td></tr>
+  {% else %}<tr><td colspan="6" class="empty">Nothing yet.</td></tr>{% endfor %}
+  </tbody>
+</table>
+<p class="row">{% if page > 0 %}<a class="button" href="/admin/audit?page={{ page - 1 }}">Newer</a>{% endif %}{% if rows|length == 100 %}<a class="button" href="/admin/audit?page={{ page + 1 }}">Older</a>{% endif %}</p>
+{% endblock %}
