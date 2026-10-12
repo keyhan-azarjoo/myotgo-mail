@@ -2,6 +2,8 @@
 audit log, and the consent page MCP clients send people to."""
 import json
 import time
+
+import anyio
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -16,6 +18,7 @@ from .mailcore import MailError
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 COOKIE = "__Host-mailapp"
+PRE_COOKIE = "__Host-mailapp-pre"
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; "
        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 
@@ -31,6 +34,12 @@ OK_MESSAGES = {
 
 def _ip(request: Request) -> str | None:
     return request.client.host if request.client else None
+
+
+# sign-in pages hash passwords (64 MB each): they get their own small pool of threads, so a flood
+# of sign-ins waits there instead of taking the threads every other page and API call needs
+LOGIN_PATHS = ("/login", "/login/code", "/password")
+_login_threads = anyio.CapacityLimiter(4)
 
 
 def _safe_next(value: str | None) -> str:
@@ -89,18 +98,22 @@ def _p(request, sess) -> service.Principal:
 
 
 def guarded(fn):
-    """Turn Gate into its response and show service errors on an error page."""
+    """Run a page handler in a worker thread (password hashing, database and IMAP work must never
+    block the server), turn Gate into its response, and show service errors on an error page."""
     import functools
 
     @functools.wraps(fn)
     async def wrapper(request: Request, *args, **kwargs):
+        if request.method == "POST":
+            request.state.form = await request.form()   # read here; handlers run in a thread
         try:
-            return await fn(request, *args, **kwargs)
+            limiter = _login_threads if request.url.path in LOGIN_PATHS else None
+            return await anyio.to_thread.run_sync(functools.partial(fn, request, *args, **kwargs), limiter=limiter)
         except Gate as g:
             return g.response
-        except (service.Forbidden,) as e:
+        except service.Forbidden as e:
             return _render(request, "error.html", auth.load_session(request.cookies.get(COOKIE)), 403, message=str(e))
-        except (service.NotFound,) as e:
+        except service.NotFound as e:
             return _render(request, "error.html", auth.load_session(request.cookies.get(COOKIE)), 404, message=str(e))
         except (service.Invalid, MailError, auth.AuthError) as e:
             return _render(request, "error.html", auth.load_session(request.cookies.get(COOKIE)), 400, message=str(e))
@@ -117,17 +130,26 @@ def _set_cookie(resp, sid: str):
 
 @router.get("/login", response_class=HTMLResponse)
 @guarded
-async def login_page(request: Request, next: str = "/"):
-    return _render(request, "login.html", next=_safe_next(next))
+def login_page(request: Request, next: str = "/"):
+    pre = security.new_token()
+    resp = _render(request, "login.html", next=_safe_next(next), pre=pre)
+    # login CSRF protection: the form must come back with the value of this cookie
+    resp.set_cookie(PRE_COOKIE, pre, httponly=True, secure=True, samesite="strict", path="/", max_age=3600)
+    return resp
 
 
 @router.post("/login")
 @guarded
-async def login(request: Request, email: str = Form(""), password: str = Form(""), next: str = Form("/")):
+def login(request: Request, email: str = Form(""), password: str = Form(""), next: str = Form("/"),
+          pre: str = Form("")):
+    cookie = request.cookies.get(PRE_COOKIE, "")
+    if not cookie or not security.same(cookie, pre):
+        return _redirect(f"/login?next={quote(_safe_next(next))}")   # form not from our page, or expired
     try:
         user = auth.check_password(email, password, _ip(request))
     except auth.AuthError as e:
-        return _render(request, "login.html", status=401, error=str(e), email=email, next=_safe_next(next))
+        resp = _render(request, "login.html", status=401, error=str(e), email=email, next=_safe_next(next), pre=cookie)
+        return resp
     auth.end_session(request.cookies.get(COOKIE))  # never reuse a session id across sign-ins
     sid, _ = auth.create_session(user["id"], mfa_ok=not user["totp_enabled"], ip=_ip(request))
     db.audit(user["email"], "login.password_ok", user["email"], None, _ip(request))
@@ -135,24 +157,26 @@ async def login(request: Request, email: str = Form(""), password: str = Form(""
     if user["totp_enabled"] and user.get("two_step_method") == "email":
         try:
             auth.send_email_code(user["id"], _ip(request))
-        except auth.AuthError as e:
-            target += f"&problem={quote(str(e))[:300]}"
+        except auth.AuthError:
+            target += "&problem=send"
     return _set_cookie(_redirect(target), sid)
 
 
 @router.get("/login/code", response_class=HTMLResponse)
 @guarded
-async def code_page(request: Request, next: str = "/"):
+def code_page(request: Request, next: str = "/"):
     sess = auth.load_session(request.cookies.get(COOKIE))
     if not sess:
         return _redirect("/login")
-    problem = request.query_params.get("problem")
-    return _render(request, "code.html", sess, next=_safe_next(next), error=problem[:300] if problem else None)
+    problem = "We couldn't send your code. Use “Send a new code” or a recovery code." \
+        if request.query_params.get("problem") == "send" else None
+    return _render(request, "code.html", sess, next=_safe_next(next), error=problem,
+                   code_to=auth.masked(sess["two_step_email"]))
 
 
 @router.post("/login/code/resend")
 @guarded
-async def code_resend(request: Request, next: str = Form("/"), csrf: str = Form("")):
+def code_resend(request: Request, next: str = Form("/"), csrf: str = Form("")):
     sess = auth.load_session(request.cookies.get(COOKIE))
     if not sess:
         return _redirect("/login")
@@ -163,7 +187,7 @@ async def code_resend(request: Request, next: str = Form("/"), csrf: str = Form(
 
 @router.post("/login/code")
 @guarded
-async def code(request: Request, code: str = Form(""), next: str = Form("/"), csrf: str = Form("")):
+def code(request: Request, code: str = Form(""), next: str = Form("/"), csrf: str = Form("")):
     sess = auth.load_session(request.cookies.get(COOKIE))
     if not sess:
         return _redirect("/login")
@@ -181,7 +205,7 @@ async def code(request: Request, code: str = Form(""), next: str = Form("/"), cs
 
 @router.post("/logout")
 @guarded
-async def logout(request: Request, csrf: str = Form("")):
+def logout(request: Request, csrf: str = Form("")):
     sess = auth.load_session(request.cookies.get(COOKIE))
     if sess:
         _csrf(sess, csrf)
@@ -193,23 +217,29 @@ async def logout(request: Request, csrf: str = Form("")):
 
 @router.get("/password", response_class=HTMLResponse)
 @guarded
-async def password_page(request: Request):
+def password_page(request: Request):
     sess = _session(request, allow_pending=True)
-    return _render(request, "password.html", sess)
+    return _render(request, "password.html", sess, is_mailbox=_is_mailbox(sess["email"]))
+
+
+def _is_mailbox(email: str) -> bool:
+    from . import mailconf
+    return (email or "").lower() in mailconf.list_accounts()
 
 
 @router.post("/password")
 @guarded
-async def password(request: Request, current: str = Form(""), new: str = Form(""), again: str = Form(""),
+def password(request: Request, current: str = Form(""), new: str = Form(""), again: str = Form(""),
                    csrf: str = Form("")):
     sess = _session(request, allow_pending=True)
     _csrf(sess, csrf)
     if new != again:
-        return _render(request, "password.html", sess, 400, error="The two new passwords don't match.")
+        return _render(request, "password.html", sess, 400, error="The two new passwords don't match.",
+                       is_mailbox=_is_mailbox(sess["email"]))
     try:
         auth.change_password(sess["user_id"], current, new)
     except auth.AuthError as e:
-        return _render(request, "password.html", sess, 400, error=str(e))
+        return _render(request, "password.html", sess, 400, error=str(e), is_mailbox=_is_mailbox(sess["email"]))
     sid, _ = auth.create_session(sess["user_id"], mfa_ok=True, ip=_ip(request))
     return _set_cookie(_redirect("/?ok=password"), sid)
 
@@ -218,7 +248,7 @@ async def password(request: Request, current: str = Form(""), new: str = Form(""
 
 @router.get("/", response_class=HTMLResponse)
 @guarded
-async def home(request: Request):
+def home(request: Request):
     sess = _session(request)
     p = _p(request, sess)
     return _render(request, "home.html", sess, mailboxes=service.list_mailboxes(p),
@@ -227,14 +257,14 @@ async def home(request: Request):
 
 @router.get("/security", response_class=HTMLResponse)
 @guarded
-async def security_page(request: Request, required: str = ""):
+def security_page(request: Request, required: str = ""):
     sess = _session(request, allow_pending=True)
-    return _render(request, "security.html", sess, required=bool(required))
+    return _render(request, "security.html", sess, required=bool(required), is_mailbox=_is_mailbox(sess["email"]))
 
 
 @router.post("/security/two-step/start", response_class=HTMLResponse)
 @guarded
-async def two_step_start(request: Request, csrf: str = Form("")):
+def two_step_start(request: Request, csrf: str = Form("")):
     sess = _session(request, allow_pending=True)
     _csrf(sess, csrf)
     if sess["totp_enabled"]:
@@ -246,7 +276,7 @@ async def two_step_start(request: Request, csrf: str = Form("")):
 
 @router.post("/security/two-step/confirm", response_class=HTMLResponse)
 @guarded
-async def two_step_confirm(request: Request, code: str = Form(""), csrf: str = Form("")):
+def two_step_confirm(request: Request, code: str = Form(""), csrf: str = Form("")):
     sess = _session(request, allow_pending=True)
     _csrf(sess, csrf)
     codes = auth.confirm_two_step(sess["user_id"], code)
@@ -259,18 +289,21 @@ async def two_step_confirm(request: Request, code: str = Form(""), csrf: str = F
 
 @router.post("/security/two-step/email/start", response_class=HTMLResponse)
 @guarded
-async def email_two_step_start(request: Request, csrf: str = Form("")):
+def email_two_step_start(request: Request, address: str = Form(""), csrf: str = Form("")):
     sess = _session(request, allow_pending=True)
     _csrf(sess, csrf)
     if sess["totp_enabled"]:
         return _redirect("/security")
-    address = auth.start_email_two_step(sess["user_id"], _ip(request))
-    return _render(request, "security.html", sess, email_setup=True, sent_to=address)
+    try:
+        sent_to = auth.start_email_two_step(sess["user_id"], address, _ip(request))
+    except auth.AuthError as e:
+        return _render(request, "security.html", sess, 400, error=str(e), is_mailbox=_is_mailbox(sess["email"]))
+    return _render(request, "security.html", sess, email_setup=True, sent_to=sent_to)
 
 
 @router.post("/security/two-step/email/confirm", response_class=HTMLResponse)
 @guarded
-async def email_two_step_confirm(request: Request, code: str = Form(""), csrf: str = Form("")):
+def email_two_step_confirm(request: Request, code: str = Form(""), csrf: str = Form("")):
     sess = _session(request, allow_pending=True)
     _csrf(sess, csrf)
     codes = auth.confirm_email_two_step(sess["user_id"], code)
@@ -283,7 +316,7 @@ async def email_two_step_confirm(request: Request, code: str = Form(""), csrf: s
 
 @router.post("/two-step/send-code")
 @guarded
-async def send_code(request: Request, next: str = Form("/"), csrf: str = Form("")):
+def send_code(request: Request, next: str = Form("/"), csrf: str = Form("")):
     """'Email me a code' on the token and consent pages."""
     sess = _session(request, allow_pending=True)
     _csrf(sess, csrf)
@@ -294,7 +327,7 @@ async def send_code(request: Request, next: str = Form("/"), csrf: str = Form(""
 
 @router.post("/security/two-step/disable")
 @guarded
-async def two_step_disable(request: Request, code: str = Form(""), csrf: str = Form("")):
+def two_step_disable(request: Request, code: str = Form(""), csrf: str = Form("")):
     sess = _session(request, allow_pending=True)
     _csrf(sess, csrf)
     if service.require_two_step():
@@ -307,7 +340,7 @@ async def two_step_disable(request: Request, code: str = Form(""), csrf: str = F
 
 @router.get("/tokens", response_class=HTMLResponse)
 @guarded
-async def tokens_page(request: Request):
+def tokens_page(request: Request):
     sess = _session(request)
     return _render(request, "tokens.html", sess, tokens=auth.list_api_tokens(sess["user_id"]), now=time.time(),
                    scopes=_scopes_for(sess), here="/tokens", grants=auth.list_oauth_grants(sess["user_id"]), fmt=_fmt)
@@ -319,11 +352,11 @@ def _scopes_for(sess):
 
 @router.post("/tokens", response_class=HTMLResponse)
 @guarded
-async def token_create(request: Request, name: str = Form(""), days: int = Form(90), code: str = Form(""),
+def token_create(request: Request, name: str = Form(""), days: int = Form(90), code: str = Form(""),
                        csrf: str = Form("")):
     sess = _session(request)
     _csrf(sess, csrf)
-    form = await request.form()
+    form = request.state.form
     scopes = form.getlist("scopes")
     ctx = dict(tokens=auth.list_api_tokens(sess["user_id"]), now=time.time(), scopes=_scopes_for(sess), here="/tokens",
                grants=auth.list_oauth_grants(sess["user_id"]), fmt=_fmt)
@@ -340,7 +373,7 @@ async def token_create(request: Request, name: str = Form(""), days: int = Form(
 
 @router.post("/tokens/{token_id}/revoke")
 @guarded
-async def token_revoke(request: Request, token_id: int, csrf: str = Form("")):
+def token_revoke(request: Request, token_id: int, csrf: str = Form("")):
     sess = _session(request)
     _csrf(sess, csrf)
     auth.revoke_api_token(sess["user_id"], token_id)
@@ -349,7 +382,7 @@ async def token_revoke(request: Request, token_id: int, csrf: str = Form("")):
 
 @router.post("/tokens/apps/{grant_id}/revoke")
 @guarded
-async def app_revoke(request: Request, grant_id: str, csrf: str = Form("")):
+def app_revoke(request: Request, grant_id: str, csrf: str = Form("")):
     sess = _session(request)
     _csrf(sess, csrf)
     auth.revoke_oauth_grant(sess["user_id"], grant_id)
@@ -358,7 +391,7 @@ async def app_revoke(request: Request, grant_id: str, csrf: str = Form("")):
 
 @router.get("/connect", response_class=HTMLResponse)
 @guarded
-async def connect(request: Request):
+def connect(request: Request):
     sess = _session(request)
     return _render(request, "connect.html", sess, mcp_url=config.MCP_URL, api_url=f"{config.PUBLIC_URL}/api/v1",
                    mail_host=config.MAIL_HOST)
@@ -368,14 +401,14 @@ async def connect(request: Request):
 
 @router.get("/admin/users", response_class=HTMLResponse)
 @guarded
-async def users(request: Request):
+def users(request: Request):
     sess = _session(request, admin=True)
     return _render(request, "users.html", sess, users=service.list_users(_p(request, sess)), fmt=_fmt)
 
 
 @router.post("/admin/users", response_class=HTMLResponse)
 @guarded
-async def user_create(request: Request, email: str = Form(""), name: str = Form(""), role: str = Form("user"),
+def user_create(request: Request, email: str = Form(""), name: str = Form(""), role: str = Form("user"),
                       csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
@@ -392,7 +425,7 @@ async def user_create(request: Request, email: str = Form(""), name: str = Form(
 
 @router.get("/admin/users/{user_id}", response_class=HTMLResponse)
 @guarded
-async def user_page(request: Request, user_id: int):
+def user_page(request: Request, user_id: int):
     sess = _session(request, admin=True)
     p = _p(request, sess)
     user = service.get_user(p, user_id)
@@ -403,7 +436,7 @@ async def user_page(request: Request, user_id: int):
 
 @router.post("/admin/users/{user_id}")
 @guarded
-async def user_update(request: Request, user_id: int, name: str = Form(""), role: str = Form("user"),
+def user_update(request: Request, user_id: int, name: str = Form(""), role: str = Form("user"),
                       disabled: str = Form(""), csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
@@ -413,11 +446,11 @@ async def user_update(request: Request, user_id: int, name: str = Form(""), role
 
 @router.post("/admin/users/{user_id}/grants")
 @guarded
-async def user_grants(request: Request, user_id: int, csrf: str = Form("")):
+def user_grants(request: Request, user_id: int, csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     p = _p(request, sess)
-    form = await request.form()
+    form = request.state.form
     for mailbox in [m["address"] for m in service.admin_mailboxes(p)]:
         service.set_grant(p, user_id, mailbox, read=form.get(f"read:{mailbox}") == "1",
                           send=form.get(f"send:{mailbox}") == "1", organize=form.get(f"organize:{mailbox}") == "1")
@@ -426,7 +459,7 @@ async def user_grants(request: Request, user_id: int, csrf: str = Form("")):
 
 @router.post("/admin/users/{user_id}/reset-password", response_class=HTMLResponse)
 @guarded
-async def user_reset(request: Request, user_id: int, csrf: str = Form("")):
+def user_reset(request: Request, user_id: int, csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     r = service.reset_user_password(_p(request, sess), user_id)
@@ -438,7 +471,7 @@ async def user_reset(request: Request, user_id: int, csrf: str = Form("")):
 
 @router.post("/admin/users/{user_id}/reset-two-step")
 @guarded
-async def user_reset_two_step(request: Request, user_id: int, csrf: str = Form("")):
+def user_reset_two_step(request: Request, user_id: int, csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     service.reset_user_two_step(_p(request, sess), user_id)
@@ -447,7 +480,7 @@ async def user_reset_two_step(request: Request, user_id: int, csrf: str = Form("
 
 @router.post("/admin/users/{user_id}/delete")
 @guarded
-async def user_delete(request: Request, user_id: int, csrf: str = Form("")):
+def user_delete(request: Request, user_id: int, csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     service.delete_user(_p(request, sess), user_id)
@@ -458,7 +491,7 @@ async def user_delete(request: Request, user_id: int, csrf: str = Form("")):
 
 @router.get("/admin/mailboxes", response_class=HTMLResponse)
 @guarded
-async def mailboxes(request: Request):
+def mailboxes(request: Request):
     sess = _session(request, admin=True)
     p = _p(request, sess)
     return _render(request, "mailboxes.html", sess, mailboxes=service.admin_mailboxes(p),
@@ -467,7 +500,7 @@ async def mailboxes(request: Request):
 
 @router.post("/admin/mailboxes", response_class=HTMLResponse)
 @guarded
-async def mailbox_create(request: Request, local: str = Form(""), csrf: str = Form("")):
+def mailbox_create(request: Request, local: str = Form(""), csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     address = local if "@" in local else f"{local}@{config.DOMAIN}"
@@ -481,7 +514,7 @@ async def mailbox_create(request: Request, local: str = Form(""), csrf: str = Fo
 
 @router.post("/admin/mailboxes/{address}/reset", response_class=HTMLResponse)
 @guarded
-async def mailbox_reset(request: Request, address: str, csrf: str = Form("")):
+def mailbox_reset(request: Request, address: str, csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     r = service.reset_mailbox_password(_p(request, sess), address)
@@ -492,7 +525,7 @@ async def mailbox_reset(request: Request, address: str, csrf: str = Form("")):
 
 @router.post("/admin/mailboxes/{address}/link")
 @guarded
-async def mailbox_link(request: Request, address: str, password: str = Form(""), csrf: str = Form("")):
+def mailbox_link(request: Request, address: str, password: str = Form(""), csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     service.link_mailbox(_p(request, sess), address, password)
@@ -501,7 +534,7 @@ async def mailbox_link(request: Request, address: str, password: str = Form(""),
 
 @router.post("/admin/mailboxes/{address}/delete")
 @guarded
-async def mailbox_delete(request: Request, address: str, confirm: str = Form(""), csrf: str = Form("")):
+def mailbox_delete(request: Request, address: str, confirm: str = Form(""), csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     service.delete_mailbox(_p(request, sess), address, confirm)
@@ -510,7 +543,7 @@ async def mailbox_delete(request: Request, address: str, confirm: str = Form("")
 
 @router.post("/admin/aliases")
 @guarded
-async def alias_create(request: Request, alias: str = Form(""), target: str = Form(""), csrf: str = Form("")):
+def alias_create(request: Request, alias: str = Form(""), target: str = Form(""), csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     alias = alias if "@" in alias else f"{alias}@{config.DOMAIN}"
@@ -520,7 +553,7 @@ async def alias_create(request: Request, alias: str = Form(""), target: str = Fo
 
 @router.post("/admin/aliases/delete")
 @guarded
-async def alias_delete(request: Request, alias: str = Form(""), target: str = Form(""), csrf: str = Form("")):
+def alias_delete(request: Request, alias: str = Form(""), target: str = Form(""), csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     service.delete_alias(_p(request, sess), alias, target)
@@ -531,7 +564,7 @@ async def alias_delete(request: Request, alias: str = Form(""), target: str = Fo
 
 @router.get("/admin/audit", response_class=HTMLResponse)
 @guarded
-async def audit(request: Request, page: int = 0):
+def audit(request: Request, page: int = 0):
     sess = _session(request, admin=True)
     rows = service.audit_log(_p(request, sess), 100, max(0, page) * 100)
     return _render(request, "audit.html", sess, rows=rows, page=max(0, page),
@@ -540,10 +573,11 @@ async def audit(request: Request, page: int = 0):
 
 @router.get("/admin/settings", response_class=HTMLResponse)
 @guarded
-async def settings_page(request: Request):
+def settings_page(request: Request):
     sess = _session(request, admin=True)
     return _render(request, "settings.html", sess, require_two_step=service.require_two_step(),
-                   senders=_linked_mailboxes(), code_sender=auth.code_sender() or "")
+                   senders=_linked_mailboxes(), code_sender=auth.code_sender() or "",
+                   allow_local=db.setting("allow_local_code_mailboxes", "0") == "1")
 
 
 def _linked_mailboxes():
@@ -552,16 +586,17 @@ def _linked_mailboxes():
 
 @router.post("/admin/settings")
 @guarded
-async def settings_save(request: Request, require_two_step: str = Form(""), code_sender: str = Form(""),
-                        csrf: str = Form("")):
+def settings_save(request: Request, require_two_step: str = Form(""), code_sender: str = Form(""),
+                  allow_local: str = Form(""), csrf: str = Form("")):
     sess = _session(request, admin=True)
     _csrf(sess, csrf)
     if require_two_step and not sess["totp_enabled"]:
         return _render(request, "settings.html", sess, 400, require_two_step=False, senders=_linked_mailboxes(),
-                       code_sender=auth.code_sender() or "",
+                       code_sender=auth.code_sender() or "", allow_local=False,
                        error="Turn on two-step verification for your own account first.")
     if code_sender and code_sender in _linked_mailboxes():
         db.set_setting("code_sender", code_sender)
+    db.set_setting("allow_local_code_mailboxes", "1" if allow_local else "0")
     service.set_require_two_step(_p(request, sess), bool(require_two_step))
     return _redirect("/admin/settings?ok=settings")
 
@@ -587,7 +622,7 @@ SCOPE_TEXT = {
 
 @router.get("/oauth/consent", response_class=HTMLResponse)
 @guarded
-async def consent_page(request: Request):
+def consent_page(request: Request):
     rid = request.query_params.get("request", "")
     sess = _session(request)
     row, client, params = oauth.pending_request(rid)
@@ -595,19 +630,24 @@ async def consent_page(request: Request):
         return _render(request, "error.html", sess, 400, message="This sign-in request expired. Start again from your app.")
     if not sess["totp_enabled"] and service.require_two_step():
         return _redirect("/security?required=1")
-    allowed = _scopes_for(sess)
-    requested = [s for s in (params.scopes or service.SCOPES) if s in allowed]
-    resp = _render(request, "consent.html", sess, rid=rid, client=client,
-                   redirect_host=urlsplit(str(params.redirect_uri)).netloc,
-                   scopes=[(s, SCOPE_TEXT[s]) for s in requested], need_code=bool(sess["totp_enabled"]),
+    return _consent(request, sess, rid, client, params)
+
+
+def _consent(request, sess, rid, client, params, status=200, error=None):
+    offered = oauth.offered_scopes(client, params, sess["role"])
+    resp = _render(request, "consent.html", sess, status, rid=rid, client=client,
+                   redirect_host=urlsplit(str(params.redirect_uri)).hostname,
+                   scopes=[(s, SCOPE_TEXT[s]) for s in offered if s != "admin"],
+                   offer_admin="admin" in offered, need_code=bool(sess["totp_enabled"]),
+                   code_to=auth.masked(sess["two_step_email"]), error=error,
                    here=f"/oauth/consent?request={rid}")
     return _allow_redirect_to(resp, str(params.redirect_uri))
 
 
 @router.post("/oauth/consent")
 @guarded
-async def consent(request: Request, request_id: str = Form(""), decision: str = Form(""), code: str = Form(""),
-                  csrf: str = Form("")):
+def consent(request: Request, request_id: str = Form(""), decision: str = Form(""), code: str = Form(""),
+            allow_admin: str = Form(""), csrf: str = Form("")):
     sess = _session(request)
     _csrf(sess, csrf)
     if decision != "approve":
@@ -615,18 +655,13 @@ async def consent(request: Request, request_id: str = Form(""), decision: str = 
         return _redirect(url) if url else _redirect("/")
     if service.require_two_step() and not sess["totp_enabled"]:
         return _redirect("/security?required=1")
+    row, client, params = oauth.pending_request(request_id)
+    if not row:
+        return _render(request, "error.html", sess, 400, message="This sign-in request expired. Start again from your app.")
     if sess["totp_enabled"] and not auth.check_second_step(sess["user_id"], code, _ip(request)):
-        row, client, params = oauth.pending_request(request_id)
-        if not row:
-            return _render(request, "error.html", sess, 400, message="This sign-in request expired.")
-        allowed = _scopes_for(sess)
-        resp = _render(request, "consent.html", sess, 401, rid=request_id, client=client,
-                       redirect_host=urlsplit(str(params.redirect_uri)).netloc,
-                       scopes=[(s, SCOPE_TEXT[s]) for s in (params.scopes or service.SCOPES) if s in allowed],
-                       need_code=True, error="That two-step code isn't right.",
-                       here=f"/oauth/consent?request={request_id}")
-        return _allow_redirect_to(resp, str(params.redirect_uri))
-    return _redirect(oauth.approve(request_id, sess["user_id"], mfa=bool(sess["totp_enabled"])))
+        return _consent(request, sess, request_id, client, params, 401, "That two-step code isn't right.")
+    return _redirect(oauth.approve(request_id, sess["user_id"], mfa=bool(sess["totp_enabled"]),
+                                   allow_admin=bool(allow_admin)))
 
 
 __all__ = ["router", "json"]

@@ -20,6 +20,19 @@ It is a thin, scripted layer on top of proven open-source mail software
 plus everything around it that usually takes a day of reading: certificates, DNS records, spam
 protection, backups, tests and the steps to move an existing domain over safely.
 
+### Screenshots
+
+| Mailboxes and your access | Per-user mailbox permissions |
+|---|---|
+| ![Mailboxes](docs/images/mailboxes.png) | ![Permissions](docs/images/permissions.png) |
+| **Mailboxes and aliases** | **API tokens and connected AI apps** |
+| ![Mail setup](docs/images/mail-setup.png) | ![Tokens](docs/images/tokens.png) |
+| **Claude asks for access (OAuth)** | **Activity log** |
+| ![Consent](docs/images/consent.png) | ![Activity](docs/images/activity.png) |
+
+<sub>Demo data. More: [sign-in](docs/images/login.png), [users](docs/images/users.png),
+[two-step setup](docs/images/security.png), [connect Claude / Outlook](docs/images/connect.png).</sub>
+
 - [What you get](#what-you-get)
 - [How it works](#how-it-works)
 - [What you need](#what-you-need)
@@ -306,7 +319,8 @@ with three faces, all backed by **one SQLite database** and the same permission 
 ```
 
 Open `https://mx.yourcompany.com`, sign in, choose your own password, then turn on two-step verification
-(**Email me codes** or an authenticator app). Only admins create accounts; there is no public sign-up.
+(an authenticator app, or codes emailed to an address outside this server). Only admins create accounts;
+there is no public sign-up.
 
 ### Who can do what
 
@@ -381,34 +395,65 @@ The full description is at `/api/v1/openapi.json`.
 
 ### How the console is secured
 
-- **Passwords:** Argon2id hashes; at least 12 characters; temporary passwords must be changed at first sign-in.
-- **Two-step verification:** a 6-digit code by **email** (sent from `no-reply@`) or from an **authenticator app**,
-  plus 10 single-use recovery codes. Each code works once; email codes expire in 10 minutes and a new code
-  cancels the previous one. *Settings → Require two-step verification* makes it mandatory for everyone.
-  When it's on, API and MCP tokens only work if they were issued after a two-step check.
-- **Sign-in limits:** 5 wrong passwords lock an account for 15 minutes; 30 failed sign-ins from one network in
-  15 minutes block it (`./mail app-unblock <ip>`); code attempts and code emails are rate limited.
-- **Sessions:** `__Host-` cookies (Secure, HttpOnly, SameSite=Strict), new session id at every sign-in,
-  30-minute idle and 12-hour maximum lifetime, CSRF token on every form.
-- **Pages:** strict Content-Security-Policy (no inline scripts), HSTS, no framing, no referrer, all output escaped.
-- **Tokens:** shown once and stored only as SHA-256 hashes; scoped; expiring; revocable; 600 requests/minute.
-- **OAuth for MCP:** OAuth 2.1 with PKCE (S256), dynamic client registration (https or localhost redirect
-  addresses only), consent page with the app's name and redirect host, one-hour access tokens, rotating refresh
-  tokens. A reused code or refresh token cancels the whole sign-in. Tokens are bound to this server.
-- **Mailbox access:** the app signs in to each mailbox like a mail app does (passwords encrypted with AES-256-GCM
-  using a key kept only on the server), so the mail server's own rules (no sending as someone else, DKIM
-  signing, spam checks) still apply.
-- **Container:** read-only filesystem, every Linux capability dropped except one, no privilege escalation.
+- **One password per person.** If a console login is also a mailbox (`anna@yourcompany.com`), both use the
+  same password: changing it on the website changes it for Outlook too. Because that password also opens the
+  mailbox over IMAP, **two-step codes never go to that same mailbox** (nor a `+address` or alias of it).
+  They come from an authenticator app (recommended) or are emailed to an address outside this server.
+  An admin can allow a dedicated codes mailbox on the server (*Settings*), never the person's own.
+- **Passwords:** Argon2id (at most 3 hashed at once, so a flood of sign-ins can't exhaust memory); mailbox
+  passwords as SHA512-CRYPT with 200,000 rounds in a file only root can read; at least 12 characters; temporary
+  passwords must be changed at first sign-in.
+- **Two-step verification:** 6-digit codes that work once (email codes expire in 10 minutes, and a new code
+  cancels the previous one), plus 10 single-use recovery codes. At most 10 wrong codes per 15 minutes and 30 per
+  day. *Settings → Require two-step verification* makes it mandatory, and then API and MCP tokens only work if
+  they were issued after a two-step check.
+- **Sign-in limits:** one generic message for every failure, so the page never reveals whether an account
+  exists or is locked; 5 wrong passwords lock that account for that network for 15 minutes; 50 per hour from
+  anywhere lock the account; 30 per 15 minutes block a network (`./mail app-unblock <ip>`).
+- **Sessions:** `__Host-` cookies (Secure, HttpOnly, SameSite=Strict), a new session id at every sign-in,
+  30-minute idle and 12-hour maximum lifetime, CSRF tokens on every form including the sign-in form.
+  Changing your password signs you out everywhere and cancels your tokens and connected apps.
+- **Pages:** strict Content-Security-Policy (no inline scripts), HSTS, no framing, no referrer, all output
+  escaped, attachments always downloaded as files.
+- **Tokens:** shown once and stored only as SHA-256 hashes; scoped; expiring; revocable; rate limited
+  (600 API requests and 300 MCP calls per minute).
+- **OAuth for MCP (Claude and others):** OAuth 2.1 with PKCE (S256). Apps register themselves, but only
+  with https redirect addresses or http to localhost (no user names, no fragments; at most 5). The consent
+  page shows the app's name and the host it returns to. **Admin access is never granted unless the person
+  ticks it.** One-hour access tokens and rotating refresh tokens; a reused code or refresh token cancels the
+  whole sign-in. Registrations, sign-ins and token requests are rate limited per IP; unused registrations
+  are removed after a week.
+- **AI safety:** the MCP server tells assistants to show every draft and send only after the person
+  confirms. Tools never return passwords: an email with hidden instructions can't make an assistant leak one.
+  An assistant can never do more than the person who connected it.
+- **Mailbox access:** the app signs in to each mailbox like a mail app (passwords encrypted with AES-256-GCM,
+  bound to their mailbox, key kept only on the server), so the mail server's own rules (no sending as someone
+  else, DKIM signing, spam checks) still apply. Disabling a person also locks their mailbox.
+- **Requests:** bodies over 64 KB are refused (30 MB where mail with attachments is sent); TLS 1.2+ with
+  forward-secret ciphers only; DNS-rebinding protection on `/mcp`.
+- **Container:** read-only filesystem, every Linux capability dropped except one, no privilege escalation,
+  pinned base image.
 - **Activity log:** sign-ins, failures, sends, deletes and every admin change, with time and IP (*Activity*).
+
+Known trade-offs: limits that stop password and code guessing can also be triggered on purpose to lock
+someone out for a while (15 minutes per network, an hour per account, a day for codes); an admin can clear
+them with `./mail app-unblock <ip>`. The app container runs as root *inside* the container, because it edits the mail server's
+root-owned account files; backups in `/var/backups/mailserver` aren't encrypted (copy them somewhere safe).
 
 ### Testing it
 
 ```bash
-./mail app-test          # 25 end-to-end tests: console, REST API, all MCP tools, OAuth, security rules
-./mail app-test-claude   # lets Claude Code use the MCP server for real, then checks the results
+./mail app-test             # 26 end-to-end tests: console, REST API, all MCP tools, OAuth, security rules
+./mail app-test-claude      # lets Claude Code use the MCP server for real, then checks the results
+./mail app-test-scenarios   # 100 realistic requests to Claude through MCP, each checked on the server
 ```
 
-Both create their own throwaway admin, mailboxes and users and remove them afterwards.
+All of them create their own throwaway admin, mailboxes and users and remove them afterwards
+(`./mail app-test-cleanup` removes leftovers if a run is interrupted). The scenarios include drafting and
+**sending only after confirmation**, cancelling, editing a draft, answering questions from received mail,
+replying, forwarding, organizing, reading attachments, and a read-only user being refused.
+
+![A real test conversation](docs/images/claude-conversation.png)
 
 ## Everyday commands
 

@@ -6,7 +6,7 @@
 <div class="brandmark"><span class="logo">✉</span> {{ app_name }}</div>
 <h1>Two-step verification</h1>
 {% if sess.two_step_method == 'email' %}
-<p class="muted">We emailed a 6-digit code to <strong>{{ sess.email }}</strong>. Enter it below, or use one of your recovery codes.</p>
+<p class="muted">We emailed a 6-digit code to <strong>{{ code_to }}</strong>. Enter it below, or use one of your recovery codes.</p>
 {% else %}
 <p class="muted">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
 {% endif %}

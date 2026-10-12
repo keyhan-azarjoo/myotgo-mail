@@ -6,3 +6,4 @@ secrets/
 *.env.local
 __pycache__/
 .venv-test/
+app/tests/scenario-results.json

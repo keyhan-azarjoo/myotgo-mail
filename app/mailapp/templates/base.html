@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="{% block body_class %}{% endblock %}">
-{% if sess and sess.mfa_ok or (sess and not sess.totp_enabled) %}
+{% block header %}{% if sess and sess.mfa_ok or (sess and not sess.totp_enabled) %}
 <header class="top">
   <a class="brand" href="/"><span class="logo">✉</span> {{ app_name }}</a>
   <nav>
@@ -27,7 +27,7 @@
     <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Sign out</button></form>
   </div>
 </header>
-{% endif %}
+{% endif %}{% endblock %}
 <main class="{% block main_class %}page{% endblock %}">
   {% if ok %}<div class="notice ok">{{ ok }}</div>{% endif %}
   {% if error %}<div class="notice err">{{ error }}</div>{% endif %}

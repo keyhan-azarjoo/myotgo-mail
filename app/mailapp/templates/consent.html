@@ -1,21 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Allow access · {{ app_name }}<form id="sendcode" method="post" action="/two-step/send-code"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ here }}"></form>
-{% endblock %}
-{% block body_class %}center<form id="sendcode" method="post" action="/two-step/send-code"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ here }}"></form>
-{% endblock %}
-{% block main_class %}card narrow<form id="sendcode" method="post" action="/two-step/send-code"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ here }}"></form>
-{% endblock %}
+{% block title %}Allow access · {{ app_name }}{% endblock %}
+{% block body_class %}center{% endblock %}
+{% block header %}{% endblock %}
+{% block main_class %}card narrow{% endblock %}
 {% block content %}
 <div class="brandmark"><span class="logo">✉</span> {{ app_name }}</div>
 <h1>Allow <span class="client">{{ client.client_name or 'this app' }}</span>?</h1>
-<p class="muted">It will act as <strong>{{ sess.email }}</strong> and send results back to <code>{{ redirect_host }}</code>.
+<p class="muted">It will act as <strong>{{ sess.email }}</strong> and send its sign-in back to <code>{{ redirect_host }}</code>.
 Only continue if you started this from your own app.</p>
-<ul class="scopes">{% for s, text in scopes %}<li><code>{{ s }}</code> {{ text }}</li>{% endfor %}</ul>
-<p class="muted small">It can never do more than your own permissions allow. Revoke it any time by signing out of the app or asking an admin.</p>
 <form method="post" action="/oauth/consent" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="request_id" value="{{ rid }}">
-  {% if need_code %}<label>Two-step code<input name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>{% if sess.two_step_method == 'email' %}<p class="small"><button class="link" form="sendcode">Email me a code</button></p>{% endif %}</label>{% endif %}
+  <ul class="scopes">{% for s, text in scopes %}<li><code>{{ s }}</code> {{ text }}</li>{% endfor %}</ul>
+  {% if offer_admin %}
+  <label class="check warnbox"><input type="checkbox" name="allow_admin" value="1">
+    <span>Also allow <strong>admin</strong> actions (users, mailboxes, aliases). Leave this off unless you need it:
+    an AI that reads email could be tricked by a message into using it.</span></label>
+  {% endif %}
+  <p class="muted small">It can never do more than your own permissions allow. You can revoke it any time under <em>API &amp; MCP → Connected apps</em>.</p>
+  {% if need_code %}<label>Two-step code{% if code_to %} <span class="muted small">(sent to {{ code_to }})</span>{% endif %}
+    <input name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
+    {% if sess.two_step_method == 'email' %}<span class="small"><button class="link" form="sendcode">Email me a code</button></span>{% endif %}</label>{% endif %}
   <div class="row">
     <button class="primary" name="decision" value="approve">Allow</button>
     <button name="decision" value="deny">Deny</button>

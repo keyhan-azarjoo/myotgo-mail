@@ -6,9 +6,12 @@ import time
 
 from . import config, db, security, service
 
-LOCK_AFTER = 5            # failed passwords in a row
-LOCK_SECONDS = 15 * 60
+LOCK_AFTER = 5            # failed passwords for one account from one network
+LOCK_WINDOW = 15 * 60
+ACCOUNT_LIMIT = 50        # failed passwords for one account from anywhere, per hour (slow, spread-out guessing)
 PAT_PREFIX = "mm_pat_"
+SIGN_IN_FAILED = ("Couldn't sign you in. Check your email and password. "
+                  "After several failed attempts, wait 15 minutes and try again.")
 
 
 class AuthError(Exception):
@@ -18,35 +21,31 @@ class AuthError(Exception):
 # ---------- password and two-step -----------------------------------------------------------
 
 def check_password(email: str, password: str, ip: str | None) -> dict:
-    """Return the user row (as dict) if the password is right. Same error for every failure."""
-    # only failed attempts count, so an office sharing one address isn't blocked by normal use
-    if security.recent_hits(f"login-fail:{ip}", 900) >= 30:
-        raise AuthError("Too many failed sign-ins from your network. Wait a few minutes and try again.")
+    """Return the user row (as dict) if the password is right. Every failure gives the same
+    message, so the page never reveals whether an account exists or is locked."""
     email = (email or "").strip().lower()
+    ip = security.ip_key(ip)
+    # only failed attempts count, so an office sharing one address isn't blocked by normal use
+    blocked = (security.recent_hits(f"login-fail:{ip}", LOCK_WINDOW) >= 30
+               or security.recent_hits(f"login-fail:{email}:{ip}", LOCK_WINDOW) >= LOCK_AFTER
+               or security.recent_hits(f"login-fail:{email}", 3600) >= ACCOUNT_LIMIT)
     row = db.one("SELECT * FROM users WHERE email = ?", (email,))
-    now = time.time()
-    if row and row["locked_until"] > now:
-        security.verify_password(None, password or "")
-        raise AuthError("This account is locked for a few minutes after too many failed attempts.")
-    ok = security.verify_password(row["password_hash"] if row else None, password or "")
-    if not ok or row["disabled"]:
-        if row:
-            fails = row["failed_logins"] + 1
-            locked = now + LOCK_SECONDS if fails >= LOCK_AFTER else 0
-            db.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?",
-                       (0 if locked else fails, locked, row["id"]))
-        security.record_hit(f"login-fail:{ip}")
-        db.audit(email, "login.failed", email, None, ip)
-        raise AuthError("Wrong email or password.")
-    db.execute("UPDATE users SET failed_logins = 0, locked_until = 0 WHERE id = ?", (row["id"],))
+    ok = security.verify_password(row["password_hash"] if row else None, password or "")  # always hash: same timing
+    if blocked or not ok or row["disabled"]:
+        if not blocked:
+            for key in (f"login-fail:{ip}", f"login-fail:{email}:{ip}", f"login-fail:{email}"):
+                security.record_hit(key)
+        db.audit(email, "login.blocked" if blocked else "login.failed", email, None, ip)
+        raise AuthError(SIGN_IN_FAILED)
     return dict(row)
 
 
 def check_second_step(user_id: int, code: str, ip: str | None) -> bool:
     """The second step: a 6-digit code from the authenticator app or from the email we sent
     (each works once), or one of the recovery codes."""
-    if security.rate_limited(f"2step:{user_id}", 20, 600):
-        raise AuthError("Too many codes tried. Wait a few minutes.")
+    if security.recent_hits(f"2step-fail:{user_id}", 900) >= 10 or \
+            security.recent_hits(f"2step-fail-day:{user_id}", 86400) >= 30:
+        raise AuthError("Too many wrong codes. Sign in again later.")
     row = db.one("SELECT totp_secret, totp_enabled, totp_last_step, recovery_codes, email, two_step_method "
                  "FROM users WHERE id = ?", (user_id,))
     if not row or not row["totp_enabled"]:
@@ -55,15 +54,22 @@ def check_second_step(user_id: int, code: str, ip: str | None) -> bool:
         if _check_email_code(user_id, code):
             return True
     else:
-        step = security.check_totp(security.decrypt(row["totp_secret"]), code, row["totp_last_step"])
+        step = security.check_totp(security.decrypt(row["totp_secret"], "totp"), code, row["totp_last_step"])
         if step is not None:
-            db.execute("UPDATE users SET totp_last_step = ? WHERE id = ?", (step, user_id))
-            return True
+            with db.tx() as conn:   # atomic: two requests can't both use the same code
+                if conn.execute("UPDATE users SET totp_last_step = ? WHERE id = ? AND totp_last_step < ?",
+                                (step, user_id, step)).rowcount:
+                    return True
     remaining = security.use_recovery_code(row["recovery_codes"], code)
     if remaining is not None:
-        db.execute("UPDATE users SET recovery_codes = ? WHERE id = ?", (remaining, user_id))
-        db.audit(row["email"], "login.recovery_code_used", row["email"], None, ip)
-        return True
+        with db.tx() as conn:
+            used = conn.execute("UPDATE users SET recovery_codes = ? WHERE id = ? AND recovery_codes = ?",
+                                (remaining, user_id, row["recovery_codes"])).rowcount
+        if used:
+            db.audit(row["email"], "login.recovery_code_used", row["email"], None, ip)
+            return True
+    security.record_hit(f"2step-fail:{user_id}")
+    security.record_hit(f"2step-fail-day:{user_id}")
     db.audit(row["email"], "login.bad_code", row["email"], None, ip)
     return False
 
@@ -80,33 +86,66 @@ def code_sender() -> str | None:
     return chosen if row else None
 
 
-def send_email_code(user_id: int, ip: str | None = None) -> str:
-    """Email a fresh 6-digit code to the user's own address. Returns the address."""
+def code_address_problem(user_email: str, address: str) -> str | None:
+    """Codes must go somewhere an attacker who knows the password can't read. A user's own
+    mailbox on this server shares their password, so it can't be used."""
+    from . import mailconf
+    address = (address or "").strip().lower()
+    if not mailconf.ANY_ADDRESS_RE.fullmatch(address):
+        return "Enter a valid email address for your codes."
+    local, domain = address.rsplit("@", 1)
+    if domain != config.DOMAIN:
+        return None
+    # On this server, addresses can lead back to your own mailbox (you+anything@, aliases) or to a
+    # shared mailbox others read. Only a dedicated codes mailbox, allowed by an admin, is accepted.
+    base = local.split("+", 1)[0] + "@" + domain
+    if db.setting("allow_local_code_mailboxes", "0") != "1":
+        return (f"Use an address outside {config.DOMAIN} (for example a personal one), or an authenticator app: "
+                f"mailboxes on this server can be read with passwords that also open the console.")
+    if base == user_email.lower() or "+" in local or address in mailconf.aliases():
+        return "Codes can't go to your own mailbox, a +address or an alias."
+    if address not in mailconf.list_accounts():
+        return f"{address} isn't a mailbox on this server."
+    return None
+
+
+def send_email_code(user_id: int, ip: str | None = None, to: str | None = None) -> str:
+    """Email a fresh 6-digit code to the user's code address. Returns the address."""
     from . import mailcore
-    row = db.one("SELECT email FROM users WHERE id = ?", (user_id,))
+    row = db.one("SELECT email, two_step_email FROM users WHERE id = ?", (user_id,))
+    target = (to or row["two_step_email"] or "").lower()
+    if not target:
+        raise AuthError("No address is set up for your sign-in codes.")
     if security.rate_limited(f"emailcode:{user_id}", 10, 600):
         raise AuthError("Too many codes sent. Wait a few minutes, then try again.")
     sender = code_sender()
     if not sender:
-        raise AuthError(f"Email codes aren't set up: an admin must create and link no-reply@{config.DOMAIN} "
-                        "or choose another sender in Settings.")
+        raise AuthError("Email codes aren't set up yet. Ask an administrator.")
     code = f"{secrets.randbelow(1_000_000):06d}"
     with db.tx() as conn:
         conn.execute("UPDATE email_codes SET used = 1 WHERE user_id = ? AND used = 0", (user_id,))  # one live code
         conn.execute("INSERT INTO email_codes(user_id, code_hash, expires_at) VALUES(?,?,?)",
                      (user_id, security.token_hash(code), time.time() + EMAIL_CODE_SECONDS))
-    msg, rcpts = mailcore.build(sender, to=[row["email"]], sender_name=config.APP_NAME,
+    msg, rcpts = mailcore.build(sender, to=[target], sender_name=config.APP_NAME,
                                 subject=f"Your sign-in code: {code}",
-                                text=(f"Your {config.APP_NAME} sign-in code is {code}.\n\n"
+                                text=(f"Your {config.APP_NAME} sign-in code for {row['email']} is {code}.\n\n"
                                       f"It works once and expires in 10 minutes. If you didn't try to sign in, "
                                       f"change your password and tell your administrator."))
-    pw = security.decrypt(db.one("SELECT password FROM mailboxes WHERE address = ?", (sender,))["password"])
+    pw = security.decrypt(db.one("SELECT password FROM mailboxes WHERE address = ?", (sender,))["password"],
+                          f"mailbox:{sender}")
     try:
         mailcore.send(sender, pw, msg, rcpts)
-    except mailcore.MailError as e:
-        raise AuthError(f"Couldn't send the code: {e}") from None
-    db.audit(row["email"], "two_step.email_code_sent", row["email"], None, ip)
-    return row["email"]
+    except mailcore.MailError:
+        raise AuthError("The code couldn't be sent. Try again, or ask an administrator.") from None
+    db.audit(row["email"], "two_step.email_code_sent", row["email"], {"to": target}, ip)
+    return target
+
+
+def masked(address: str | None) -> str:
+    if not address or "@" not in address:
+        return ""
+    local, domain = address.split("@", 1)
+    return f"{local[:2]}{'•' * max(1, len(local) - 2)}@{domain}"
 
 
 def _check_email_code(user_id: int, code: str) -> bool:
@@ -117,22 +156,28 @@ def _check_email_code(user_id: int, code: str) -> bool:
         if not row or row["attempts"] >= 5:
             return False
         if security.same(row["code_hash"], security.token_hash(code)):
-            conn.execute("UPDATE email_codes SET used = 1 WHERE id = ?", (row["id"],))
-            return True
+            return bool(conn.execute("UPDATE email_codes SET used = 1 WHERE id = ? AND used = 0",
+                                     (row["id"],)).rowcount)
         conn.execute("UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?", (row["id"],))
         return False
 
 
-def start_email_two_step(user_id: int, ip: str | None) -> str:
-    db.execute("UPDATE users SET two_step_method = 'email_pending' WHERE id = ? AND totp_enabled = 0", (user_id,))
+def start_email_two_step(user_id: int, address: str, ip: str | None) -> str:
+    row = db.one("SELECT email, totp_enabled FROM users WHERE id = ?", (user_id,))
+    if row["totp_enabled"]:
+        raise AuthError("Two-step verification is already on. Turn it off first to change it.")
+    if problem := code_address_problem(row["email"], address):
+        raise AuthError(problem)
+    db.execute("UPDATE users SET two_step_method = 'email_pending', two_step_email = ? WHERE id = ?",
+               (address.strip().lower(), user_id))
     return send_email_code(user_id, ip)
 
 
 def confirm_email_two_step(user_id: int, code: str) -> list[str] | None:
-    if not _check_email_code(user_id, code):
+    row = db.one("SELECT email, two_step_method FROM users WHERE id = ?", (user_id,))
+    if row["two_step_method"] != "email_pending" or not _check_email_code(user_id, code):
         return None
     codes, stored = security.new_recovery_codes()
-    row = db.one("SELECT email FROM users WHERE id = ?", (user_id,))
     db.execute("UPDATE users SET totp_enabled = 1, two_step_method = 'email', totp_secret = NULL, recovery_codes = ? "
                "WHERE id = ?", (stored, user_id))
     db.audit(row["email"], "two_step.enabled", row["email"], {"method": "email"})
@@ -141,17 +186,20 @@ def confirm_email_two_step(user_id: int, code: str) -> list[str] | None:
 
 def start_two_step(user_id: int) -> tuple[str, str]:
     """New secret (not active until confirmed). Returns (secret, otpauth URI)."""
-    row = db.one("SELECT email FROM users WHERE id = ?", (user_id,))
+    row = db.one("SELECT email, totp_enabled FROM users WHERE id = ?", (user_id,))
+    if row["totp_enabled"]:
+        raise AuthError("Two-step verification is already on. Turn it off first to change it.")
     secret = security.new_totp_secret()
-    db.execute("UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?", (security.encrypt(secret), user_id))
+    db.execute("UPDATE users SET totp_secret = ?, two_step_method = 'totp_pending' WHERE id = ?",
+               (security.encrypt(secret, "totp"), user_id))
     return secret, security.totp_uri(secret, row["email"])
 
 
 def confirm_two_step(user_id: int, code: str) -> list[str] | None:
-    row = db.one("SELECT totp_secret, totp_last_step, email FROM users WHERE id = ?", (user_id,))
-    if not row or not row["totp_secret"]:
+    row = db.one("SELECT totp_secret, totp_last_step, email, two_step_method FROM users WHERE id = ?", (user_id,))
+    if not row or not row["totp_secret"] or row["two_step_method"] != "totp_pending":
         return None
-    step = security.check_totp(security.decrypt(row["totp_secret"]), code, row["totp_last_step"])
+    step = security.check_totp(security.decrypt(row["totp_secret"], "totp"), code, row["totp_last_step"])
     if step is None:
         return None
     codes, stored = security.new_recovery_codes()
@@ -164,7 +212,7 @@ def confirm_two_step(user_id: int, code: str) -> list[str] | None:
 def disable_two_step(user_id: int) -> None:
     with db.tx() as conn:
         conn.execute("UPDATE users SET totp_secret = NULL, totp_enabled = 0, two_step_method = NULL, "
-                     "recovery_codes = '[]' WHERE id = ?", (user_id,))
+                     "two_step_email = NULL, recovery_codes = '[]' WHERE id = ?", (user_id,))
         # tokens were issued under two-step: take them back
         conn.execute("UPDATE api_tokens SET revoked = 1 WHERE user_id = ?", (user_id,))
         conn.execute("UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?", (user_id,))
@@ -180,10 +228,17 @@ def change_password(user_id: int, current: str, new: str) -> None:
         raise AuthError(problem)
     if security.verify_password(row["password_hash"], new):
         raise AuthError("Choose a password different from the current one.")
+    try:
+        service.sync_mailbox_password(row["email"], new)     # same password for the mailbox, if there is one
+    except Exception:  # noqa: BLE001 - don't change one without the other
+        raise AuthError("Your mailbox password couldn't be updated, so nothing was changed. Try again.") from None
     with db.tx() as conn:
         conn.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
                      (security.hash_password(new), user_id))
+        # a new password signs you out everywhere and cancels tokens and connected apps
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE api_tokens SET revoked = 1 WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?", (user_id,))
     db.audit(row["email"], "password.changed", row["email"])
 
 
@@ -203,7 +258,7 @@ def load_session(sid: str | None):
     if not sid:
         return None
     row = db.one("SELECT s.*, u.email, u.role, u.disabled, u.must_change_password, u.totp_enabled, u.name, "
-                 "u.two_step_method "
+                 "u.two_step_method, u.two_step_email "
                  "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?", (security.token_hash(sid),))
     now = time.time()
     if (not row or row["disabled"] or now - row["last_seen"] > config.SESSION_IDLE_MINUTES * 60

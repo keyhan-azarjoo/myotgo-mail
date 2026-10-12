@@ -11,7 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from . import service
+from . import security, service
 from .mailcore import MailError
 
 log = logging.getLogger("mailapp.mcp")
@@ -29,10 +29,25 @@ Attachments = Annotated[list[dict] | None, Field(
     description="Files to attach: [{'filename': 'a.pdf', 'content_type': 'application/pdf', 'content_base64': '...'}]")]
 
 
+SECRET_KEYS = ("password", "temporary_password")
+SECRET_NOTE = "not shown to AI assistants: an admin can set or see it in the web console"
+
+
+def _no_secrets(result):
+    """Passwords never go into an AI's context, where a malicious email could get them sent out."""
+    if isinstance(result, dict):
+        return {k: (SECRET_NOTE if k in SECRET_KEYS else _no_secrets(v)) for k, v in result.items()}
+    if isinstance(result, list):
+        return [_no_secrets(v) for v in result]
+    return result
+
+
 def _principal() -> service.Principal:
     token = get_access_token()
     if token is None or not token.subject:
         raise ToolError("Not signed in.")
+    if security.rate_limited(f"mcp:{security.token_hash(token.token)[:16]}", 300, 60):
+        raise ToolError("Too many requests. Slow down and try again in a minute.")
     try:
         return service.principal_for(int(token.subject), token.scopes, via="mcp")
     except service.Forbidden as e:
@@ -42,7 +57,7 @@ def _principal() -> service.Principal:
 async def _run(fn, *args, **kwargs):
     p = _principal()
     try:
-        return await anyio.to_thread.run_sync(functools.partial(fn, p, *args, **kwargs))
+        return _no_secrets(await anyio.to_thread.run_sync(functools.partial(fn, p, *args, **kwargs)))
     except (service.Forbidden, service.NotFound, service.Invalid, MailError) as e:
         raise ToolError(str(e)) from None
     except ToolError:
@@ -118,21 +133,21 @@ def register(mcp) -> None:
                              description="Send as one of the mailbox's aliases instead")] = None,
                          from_name: Annotated[str | None, Field(description="Display name, e.g. 'Support team'")] = None,
                          ) -> dict[str, Any]:
-        """Send an email from a mailbox. A copy is saved in its Sent folder."""
+        """Send an email from a mailbox. A copy is saved in its Sent folder. Only call this after the person has seen the full draft and confirmed it."""
         return await _run(service.send, mailbox, to=to, subject=subject, text=text, html=html, cc=cc or [],
                           bcc=bcc or [], attachments=attachments or [], from_address=from_address, from_name=from_name)
 
     @mcp.tool(annotations=WRITE)
     async def reply_email(mailbox: Mailbox, uid: Uid, text: str, folder: Folder = "INBOX",
                           reply_all: bool = False, attachments: Attachments = None) -> dict[str, Any]:
-        """Reply to a message (quotes it, keeps the conversation threaded, marks it answered)."""
+        """Reply to a message (quotes it, keeps the conversation threaded, marks it answered). Only call this after the person has seen the full draft and confirmed it."""
         return await _run(service.reply, mailbox, folder, uid, text=text, reply_all=reply_all,
                           attachments=attachments or [])
 
     @mcp.tool(annotations=WRITE)
     async def forward_email(mailbox: Mailbox, uid: Uid, to: Addresses, text: str = "",
                             folder: Folder = "INBOX", cc: Addresses | None = None) -> dict[str, Any]:
-        """Forward a message, attached in full, with an optional note."""
+        """Forward a message, attached in full, with an optional note. Only call this after the person has seen the full draft and confirmed it."""
         return await _run(service.forward, mailbox, folder, uid, to=to, text=text, cc=cc or [])
 
     @mcp.tool(annotations=WRITE)
@@ -187,7 +202,8 @@ def register(mcp) -> None:
     @mcp.tool(annotations=WRITE)
     async def admin_create_user(email: str, name: str = "",
                                 role: Annotated[str, Field(pattern="^(admin|user)$")] = "user") -> dict[str, Any]:
-        """Create a console user. Returns a temporary password they must change at first sign-in."""
+        """Create a console user. Their temporary password is NOT returned here: set it with
+        'New temporary password' in the web console and give it to them."""
         return await _run(service.create_user, email, name, role)
 
     @mcp.tool(annotations=WRITE)
@@ -207,7 +223,8 @@ def register(mcp) -> None:
 
     @mcp.tool(annotations=WRITE)
     async def admin_reset_user_password(email: str) -> dict[str, Any]:
-        """Give a user a new temporary password (signs them out everywhere)."""
+        """Give a user a new temporary password and sign them out everywhere. The password is not returned
+        here: an admin sees it in the web console."""
         uid = await _run(service.user_id_by_email, email)
         return await _run(service.reset_user_password, uid)
 
@@ -224,12 +241,13 @@ def register(mcp) -> None:
 
     @mcp.tool(annotations=WRITE)
     async def admin_create_mailbox(address: Mailbox) -> dict[str, Any]:
-        """Create a mailbox. Returns its password once (for Outlook or other mail apps)."""
+        """Create a mailbox. Its password is not returned here: an admin sets it in the web console."""
         return await _run(service.create_mailbox, address)
 
     @mcp.tool(annotations=WRITE)
     async def admin_reset_mailbox_password(address: Mailbox) -> dict[str, Any]:
-        """New password for a mailbox (mail apps must be updated). Returned once."""
+        """Give a mailbox a new random password (signs out mail apps using the old one). The new password is
+        not returned here: an admin sets or sees it in the web console."""
         return await _run(service.reset_mailbox_password, address)
 
     @mcp.tool(annotations=DESTRUCTIVE)

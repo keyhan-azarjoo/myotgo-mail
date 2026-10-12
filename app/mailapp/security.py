@@ -5,7 +5,9 @@ import hmac
 import json
 import os
 import re
+import random
 import secrets
+import threading
 import time
 
 import pyotp
@@ -16,6 +18,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from . import config, db
 
 _ph = PasswordHasher()  # argon2id with the library's current recommended parameters
+# each hash needs ~64 MB of memory: never run more than a few at once
+_hash_slots = threading.BoundedSemaphore(3)
 # A real hash of a random password, verified on unknown users so timing doesn't reveal them.
 _DUMMY_HASH = _ph.hash(secrets.token_urlsafe(16))
 
@@ -25,12 +29,16 @@ MIN_PASSWORD = 12
 # ---------- passwords ----------------------------------------------------------------
 
 def hash_password(password: str) -> str:
-    return _ph.hash(password)
+    with _hash_slots:
+        return _ph.hash(password)
 
 
 def verify_password(stored: str | None, password: str) -> bool:
+    if len(password or "") > 256:
+        return False
     try:
-        return _ph.verify(stored or _DUMMY_HASH, password) and stored is not None
+        with _hash_slots:
+            return _ph.verify(stored or _DUMMY_HASH, password) and stored is not None
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
 
@@ -68,14 +76,19 @@ def same(a: str, b: str) -> bool:
 
 # ---------- encryption at rest -------------------------------------------------------
 
-def encrypt(plain: str) -> str:
+def encrypt(plain: str, context: str) -> str:
+    """AES-256-GCM. `context` (e.g. "mailbox:a@b.com") is bound in as associated data, so a
+    value copied into another row or field can't be decrypted there."""
     nonce = os.urandom(12)
-    ct = AESGCM(config.SECRET_KEY).encrypt(nonce, plain.encode(), b"mailapp")
-    return base64.b64encode(nonce + ct).decode()
+    ct = AESGCM(config.SECRET_KEY).encrypt(nonce, plain.encode(), b"mailapp:" + context.encode())
+    return "v2:" + base64.b64encode(nonce + ct).decode()
 
 
-def decrypt(blob: str) -> str:
-    raw = base64.b64decode(blob)
+def decrypt(blob: str, context: str) -> str:
+    if blob.startswith("v2:"):
+        raw = base64.b64decode(blob[3:])
+        return AESGCM(config.SECRET_KEY).decrypt(raw[:12], raw[12:], b"mailapp:" + context.encode()).decode()
+    raw = base64.b64decode(blob)   # values stored before contexts were added
     return AESGCM(config.SECRET_KEY).decrypt(raw[:12], raw[12:], b"mailapp").decode()
 
 
@@ -122,6 +135,19 @@ def use_recovery_code(stored_json: str, code: str) -> str | None:
 
 # ---------- rate limits ---------------------------------------------------------------
 
+def ip_key(ip: str | None) -> str:
+    """The unit rate limits count: one IPv4 address, or one IPv6 /64 (what a single customer gets)."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip or "")
+    except ValueError:
+        return ip or "?"
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
 def recent_hits(key: str, window: int) -> int:
     return db.one("SELECT COUNT(*) AS n FROM rate WHERE key = ? AND ts > ?", (key, time.time() - window))["n"]
 
@@ -129,7 +155,8 @@ def recent_hits(key: str, window: int) -> int:
 def record_hit(key: str) -> None:
     now = time.time()
     with db.tx() as conn:
-        conn.execute("DELETE FROM rate WHERE ts < ?", (now - 86400,))
+        if random.random() < 0.01:
+            conn.execute("DELETE FROM rate WHERE ts < ?", (now - 86400,))
         conn.execute("INSERT INTO rate(key, ts) VALUES(?, ?)", (key, now))
 
 
@@ -137,7 +164,8 @@ def rate_limited(key: str, limit: int, window: int) -> bool:
     """Record one hit for key; True if there were already `limit` hits in `window` seconds."""
     now = time.time()
     with db.tx() as conn:
-        conn.execute("DELETE FROM rate WHERE ts < ?", (now - 86400,))
+        if random.random() < 0.01:
+            conn.execute("DELETE FROM rate WHERE ts < ?", (now - 86400,))
         count = conn.execute("SELECT COUNT(*) FROM rate WHERE key = ? AND ts > ?", (key, now - window)).fetchone()[0]
         if count >= limit:
             return True

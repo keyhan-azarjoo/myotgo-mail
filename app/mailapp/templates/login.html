@@ -7,6 +7,7 @@
 <h1>Sign in</h1>
 <form method="post" action="/login" class="stack">
   <input type="hidden" name="next" value="{{ next }}">
+  <input type="hidden" name="pre" value="{{ pre }}">
   <label>Email<input type="email" name="email" value="{{ email or '' }}" autocomplete="username" required autofocus></label>
   <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
   <button class="primary">Sign in</button>

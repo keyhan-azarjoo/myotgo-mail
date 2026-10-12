@@ -188,8 +188,9 @@ async def message(mailbox: str, uid: int, p=P, folder: str = "INBOX", html: bool
 async def attachment(mailbox: str, uid: int, index: int, p=P, folder: str = "INBOX"):
     name, ctype, data = await call(service.attachment, p, mailbox, folder, uid, index)
     safe = "".join(ch for ch in name if ch.isalnum() or ch in "._- ")[:150] or "attachment"
-    return Response(data, media_type=ctype if "/" in ctype else "application/octet-stream",
-                    headers={"Content-Disposition": f'attachment; filename="{safe}"'})
+    # always a download, never rendered: the content type comes from whoever sent the email
+    return Response(data, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{safe}"', "X-Original-Content-Type": ctype[:100]})
 
 
 @router.post("/mailboxes/{mailbox}/send")

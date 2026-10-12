@@ -12,20 +12,23 @@ newpass() {
   echo "$p"
 }
 
-# Keep the console's stored copy of the mailbox password in step (if the console runs).
-link_app() {
-  if remote "docker ps --format '{{.Names}}' | grep -qx mailapp"; then
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      if printf '%s\n' "$2" | remote "docker exec -i mailapp python -m mailapp.cli link-mailbox '$1'" >/dev/null 2>&1; then
-        echo "console: linked $1"; return; fi
-      sleep 3
-    done
-    echo "console: couldn't link $1 yet; run ./mail app-link $1 in a minute" >&2
+app_running() { remote "docker ps --format '{{.Names}}' | grep -qx mailapp"; }
+
+# Create a mailbox or set its password. With the console running, the password travels on stdin
+# (never on a command line, where other processes could see it) and the console stays in step.
+set_password() {
+  if app_running; then
+    printf '%s\n' "$2" | remote "docker exec -i mailapp python -m mailapp.cli mailbox-password '$1'"
+  elif [[ $3 == add ]]; then
+    dms email add "$1" "$2"
+  else
+    dms email update "$1" "$2"
   fi
 }
 
 need_addr() {
-  [[ ${1:-} == *@"$DOMAIN" ]] || { echo "give a full address ending in @$DOMAIN" >&2; exit 1; }
+  local re="^[a-z0-9]([a-z0-9._+-]{0,62}[a-z0-9])?@${DOMAIN//./\\.}$"
+  [[ ${1:-} =~ $re ]] || { echo "give a full address ending in @$DOMAIN (letters, digits, . _ + -)" >&2; exit 1; }
 }
 
 case "${1:-}" in
@@ -33,9 +36,8 @@ case "${1:-}" in
     need_addr "${2:-}"
     first=$(dms email list 2>/dev/null | grep -c '^\* ' || true)
     p=$(newpass "$2")
-    dms email add "$2" "$p"
+    set_password "$2" "$p" add
     echo "created $2"
-    link_app "$2" "$p"
     echo "password: $p   (also saved in $SECRETS_DIR/$2.txt)"
     if [[ $first == 0 && -n ${DEFAULT_ALIASES:-} ]]; then
       IFS=, read -ra names <<<"$DEFAULT_ALIASES"
@@ -45,8 +47,7 @@ case "${1:-}" in
   passwd)
     need_addr "${2:-}"
     p=$(newpass "$2")
-    dms email update "$2" "$p"
-    link_app "$2" "$p"
+    set_password "$2" "$p" update
     echo "new password for $2: $p   (also saved in $SECRETS_DIR/$2.txt)"
     ;;
   del)
@@ -56,7 +57,7 @@ case "${1:-}" in
     dms email del -y "$2" && rm -f "$SECRETS_DIR/$2.txt" && echo "deleted $2"
     ;;
   alias)
-    need_addr "${2:-}"; need_addr "${3:-}"
+    need_addr "${2:-}"; [[ ${3:-} =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "bad target" >&2; exit 1; }
     dms alias add "$2" "$3" && echo "alias $2 -> $3"
     ;;
   unalias)

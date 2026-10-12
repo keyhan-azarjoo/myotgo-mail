@@ -5,6 +5,7 @@ pages, where the password and the two-step code are checked."""
 import json
 import secrets
 import time
+from urllib.parse import urlsplit
 
 from mcp.server.auth.provider import (AccessToken, AuthorizationCode, AuthorizationParams, AuthorizeError,
                                       RefreshToken, RegistrationError, TokenError)
@@ -21,16 +22,28 @@ class Provider:
     # ---- clients (dynamic registration) ----
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         row = db.one("SELECT info FROM oauth_clients WHERE client_id = ?", (client_id,))
-        return OAuthClientInformationFull.model_validate_json(row["info"]) if row else None
+        if not row:
+            return None
+        client = OAuthClientInformationFull.model_validate_json(row["info"])
+        if any(redirect_problem(str(u)) for u in client.redirect_uris or []):
+            return None   # registered before the stricter rules: not usable any more
+        return client
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        # forget registrations that were never used, so the table can't be filled up for good
+        db.execute("DELETE FROM oauth_clients WHERE created_at < ? AND client_id NOT IN "
+                   "(SELECT DISTINCT client_id FROM oauth_tokens) AND client_id NOT IN "
+                   "(SELECT DISTINCT client_id FROM oauth_requests)", (time.time() - 3600,))
         if db.one("SELECT COUNT(*) AS n FROM oauth_clients")["n"] >= MAX_CLIENTS:
             raise RegistrationError(error="invalid_client_metadata", error_description="Too many registered clients.")
-        for uri in client_info.redirect_uris or []:
-            u = str(uri)
-            if not (u.startswith("https://") or u.startswith("http://localhost") or u.startswith("http://127.0.0.1")):
-                raise RegistrationError(error="invalid_redirect_uri",
-                                        error_description="Redirect URIs must be https or a local loopback address.")
+        if len(client_info.client_name or "") > 64:
+            raise RegistrationError(error="invalid_client_metadata", error_description="client_name is too long.")
+        uris = [str(u) for u in client_info.redirect_uris or []]
+        if not uris or len(uris) > 5:
+            raise RegistrationError(error="invalid_redirect_uri", error_description="Give 1 to 5 redirect URIs.")
+        for u in uris:
+            if problem := redirect_problem(u):
+                raise RegistrationError(error="invalid_redirect_uri", error_description=problem)
         db.execute("INSERT INTO oauth_clients(client_id, info, created_at) VALUES(?,?,?)",
                    (client_info.client_id, client_info.model_dump_json(), time.time()))
         db.audit(None, "oauth.client_registered", client_info.client_name or client_info.client_id,
@@ -144,6 +157,25 @@ class Provider:
                           refresh_token=refresh)
 
 
+def redirect_problem(uri: str) -> str | None:
+    """https anywhere, or plain http only to this computer (how desktop apps receive the code)."""
+    p = urlsplit(uri)
+    if p.username or p.password or p.fragment:
+        return "Redirect URIs can't contain a user name, password or #fragment."
+    if p.scheme == "https" and p.hostname:
+        return None
+    if p.scheme == "http" and p.hostname in ("localhost", "127.0.0.1", "::1"):
+        return None
+    return "Redirect URIs must be https, or http to localhost."
+
+
+def offered_scopes(client, params, role: str) -> list[str]:
+    """What the consent page offers: what the app asked for (or registered for), never more than
+    the person's role allows. Admin access is only ever granted when ticked on the page."""
+    requested = params.scopes or (client.scope.split() if client.scope else ["mail.read", "mail.send", "mail.organize"])
+    return [s for s in service.SCOPES if s in requested and (s != "admin" or role == "admin")]
+
+
 def pending_request(rid: str):
     row = db.one("SELECT * FROM oauth_requests WHERE id = ? AND expires_at > ?", (rid or "", time.time()))
     if not row:
@@ -154,15 +186,14 @@ def pending_request(rid: str):
     return row, OAuthClientInformationFull.model_validate_json(client["info"]), AuthorizationParams.model_validate_json(row["params"])
 
 
-def approve(rid: str, user_id: int, mfa: bool = False) -> str:
+def approve(rid: str, user_id: int, mfa: bool = False, allow_admin: bool = False) -> str:
     """Create the authorization code for a pending request and return the client redirect URL."""
     from mcp.server.auth.provider import construct_redirect_uri
     row, client, params = pending_request(rid)
     if not row:
         raise auth.AuthError("This sign-in request expired. Start again from your app.")
     user = db.one("SELECT role FROM users WHERE id = ?", (user_id,))
-    requested = params.scopes or list(service.SCOPES)
-    scopes = [s for s in requested if s in service.SCOPES and (s != "admin" or user["role"] == "admin")]
+    scopes = [s for s in offered_scopes(client, params, user["role"]) if s != "admin" or allow_admin]
     code = security.new_token()
     with db.tx() as conn:
         conn.execute("DELETE FROM oauth_requests WHERE id = ?", (rid,))

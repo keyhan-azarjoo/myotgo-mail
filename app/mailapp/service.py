@@ -95,7 +95,7 @@ def _password(mailbox: str) -> str:
     row = db.one("SELECT password FROM mailboxes WHERE address = ?", (mailbox,))
     if not row or not row["password"]:
         raise MailError(f"{mailbox} isn't linked to the console yet. An admin can link it on the Mailboxes page.")
-    return security.decrypt(row["password"])
+    return security.decrypt(row["password"], f"mailbox:{mailbox}")
 
 
 class _Box:
@@ -351,6 +351,12 @@ def update_user(p, user_id: int, *, name=None, role=None, disabled=None) -> dict
             conn.execute("UPDATE users SET disabled = ? WHERE id = ?", (1 if disabled else 0, user_id))
             if disabled:
                 _revoke_everything(conn, user_id)
+    if disabled and row["email"].lower() in mailconf.list_accounts():
+        # one password for login and mailbox: a disabled person must lose mail-app access too
+        new = security.generate_password(32)
+        mailconf.set_password(row["email"].lower(), new)
+        _store_mailbox_password(row["email"].lower(), new)
+        _wait_for_login(row["email"].lower(), new)   # the mail server applies it within seconds
     _audit(p, "user.update", row["email"], {"name": name, "role": role, "disabled": disabled})
     return get_user(p, user_id)
 
@@ -367,6 +373,8 @@ def reset_user_password(p, user_id: int) -> dict:
     if not row:
         raise NotFound("No such user.")
     temp = security.generate_password()
+    # one password: the mailbox gets the temporary password too, so the old one stops working everywhere
+    sync_mailbox_password(row["email"], temp)
     with db.tx() as conn:
         conn.execute("UPDATE users SET password_hash = ?, must_change_password = 1, failed_logins = 0, "
                      "locked_until = 0 WHERE id = ?", (security.hash_password(temp), user_id))
@@ -382,7 +390,7 @@ def reset_user_two_step(p, user_id: int) -> dict:
         raise NotFound("No such user.")
     with db.tx() as conn:
         conn.execute("UPDATE users SET totp_secret = NULL, totp_enabled = 0, two_step_method = NULL, "
-                     "recovery_codes = '[]' WHERE id = ?",
+                     "two_step_email = NULL, recovery_codes = '[]' WHERE id = ?",
                      (user_id,))
         _revoke_everything(conn, user_id)
     _audit(p, "user.reset_two_step", row["email"])
@@ -398,13 +406,17 @@ def delete_user(p, user_id: int) -> dict:
         raise NotFound("No such user.")
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     forget_rate_limits(user_id)
+    if row["email"].lower() in mailconf.list_accounts():
+        # the person loses mail-app access too; the mailbox and its mail stay for the admin
+        sync_mailbox_password(row["email"], security.generate_password(32))
     _audit(p, "user.delete", row["email"])
     return {"deleted": row["email"]}
 
 
 def forget_rate_limits(user_id: int) -> None:
     """User ids can be reused after a delete: don't let a new user inherit old counters."""
-    db.execute("DELETE FROM rate WHERE key IN (?, ?)", (f"2step:{user_id}", f"emailcode:{user_id}"))
+    db.execute("DELETE FROM rate WHERE key IN (?, ?, ?, ?)",
+               (f"2step:{user_id}", f"2step-fail:{user_id}", f"2step-fail-day:{user_id}", f"emailcode:{user_id}"))
 
 
 def set_grant(p, user_id: int, mailbox: str, *, read=False, send=False, organize=False) -> dict:
@@ -440,19 +452,33 @@ def admin_mailboxes(p) -> list[dict]:
     return out
 
 
-def _wait_for_login(address: str, password: str, seconds: int = 45) -> bool:
+def _wait_for_login(address: str, password: str, seconds: int = 20) -> bool:
+    """The mail server applies account changes within a few seconds; wait until it has."""
     deadline = time.time() + seconds
     while time.time() < deadline:
         if mailcore.check_login(address, password):
             return True
-        time.sleep(2)
+        time.sleep(1)
     return False
+
+
+def sync_mailbox_password(email: str, password: str) -> bool:
+    """If this login is also a mailbox on the server, give the mailbox the same password
+    (so the website, Outlook and other mail apps all use one password). True if synced."""
+    address = (email or "").strip().lower()
+    if address not in mailconf.list_accounts():
+        return False
+    mailconf.set_password(address, password)
+    _store_mailbox_password(address, password)
+    _wait_for_login(address, password)
+    db.audit(address, "mailbox.password_synced", address)
+    return True
 
 
 def _store_mailbox_password(address: str, password: str):
     db.execute("INSERT INTO mailboxes(address, password, created_at) VALUES(?,?,?) "
                "ON CONFLICT(address) DO UPDATE SET password = excluded.password",
-               (address, security.encrypt(password), time.time()))
+               (address, security.encrypt(password, f"mailbox:{address}"), time.time()))
 
 
 def create_mailbox(p, address: str) -> dict:
@@ -482,6 +508,14 @@ def reset_mailbox_password(p, address: str) -> dict:
         raise Invalid(str(e)) from None
     _store_mailbox_password(address, password)
     ready = _wait_for_login(address, password)
+    # the console login with the same address gets the same password (to be changed at next sign-in),
+    # and everything signed in with the old one is signed out
+    user = db.one("SELECT id FROM users WHERE email = ?", (address,))
+    if user:
+        with db.tx() as conn:
+            conn.execute("UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
+                         (security.hash_password(password), user["id"]))
+            _revoke_everything(conn, user["id"])
     _audit(p, "mailbox.reset_password", address)
     return {"address": address, "password": password, "ready": ready,
             "note": "Shown once. Mail apps using the old password must be updated."}
@@ -497,6 +531,12 @@ def link_mailbox(p, address: str, password: str) -> dict:
     if not mailcore.check_login(address, password):
         raise Invalid("That password doesn't work for this mailbox.")
     _store_mailbox_password(address, password)
+    # keep the console login with the same address on the same password, and sign it out
+    user = db.one("SELECT id FROM users WHERE email = ?", (address,))
+    if user:
+        with db.tx() as conn:
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (security.hash_password(password), user["id"]))
+            _revoke_everything(conn, user["id"])
     db.audit(p.actor if p else "cli", "mailbox.link", address, None, p.ip if p else None)
     return {"address": address, "linked": True}
 

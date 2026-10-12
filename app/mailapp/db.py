@@ -1,5 +1,6 @@
 """SQLite: the one database for users, permissions, sessions, tokens and the audit log."""
 import json
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS rate (
   ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS rate_key ON rate(key, ts);
+CREATE INDEX IF NOT EXISTS rate_ts ON rate(ts);
 CREATE TABLE IF NOT EXISTS email_codes (
   id INTEGER PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -163,6 +165,7 @@ def execute(sql: str, args=()) -> int:
 
 
 def init() -> None:
+    os.umask(0o077)   # the database and its -wal/-shm files are readable by the app only
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = connect()
     try:
@@ -173,6 +176,17 @@ def init() -> None:
         if "two_step_method" not in ucols:   # 'totp' (authenticator app) or 'email'
             conn.execute("ALTER TABLE users ADD COLUMN two_step_method TEXT")
             conn.execute("UPDATE users SET two_step_method = 'totp' WHERE totp_enabled = 1")
+        if "two_step_email" not in ucols:    # where email codes go (never the user's own mailbox)
+            conn.execute("ALTER TABLE users ADD COLUMN two_step_email TEXT")
+            # email codes used to go to the login address itself, which shares its password:
+            # those users set two-step up again at their next sign-in
+            ids = [r[0] for r in conn.execute("SELECT id FROM users WHERE two_step_method IN ('email', 'email_pending')")]
+            for uid in ids:
+                conn.execute("UPDATE users SET totp_enabled = 0, two_step_method = NULL, recovery_codes = '[]', "
+                             "must_change_password = 1 WHERE id = ?", (uid,))
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+                conn.execute("UPDATE api_tokens SET revoked = 1 WHERE user_id = ?", (uid,))
+                conn.execute("UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?", (uid,))
         for table in ("api_tokens", "oauth_tokens", "oauth_codes"):
             cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
             if "mfa" not in cols:

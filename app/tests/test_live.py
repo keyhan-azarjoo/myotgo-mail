@@ -11,7 +11,9 @@ Environment:
   DOMAIN                  example.com
   ADMIN_EMAIL             an admin login made for the test; also a mailbox
   ADMIN_PASSWORD          its temporary console password
-  ADMIN_MAILBOX_PASSWORD  the mailbox password (to read its sign-in codes)
+  ADMIN_MAILBOX_PASSWORD  the mailbox password
+  CODES_MAILBOX           a separate mailbox that receives every test user's sign-in codes
+  CODES_PASSWORD          its password
 """
 import asyncio
 import base64
@@ -44,15 +46,18 @@ def addr(name):
     return f"e2e-{RUN}-{name}@{DOMAIN}"
 
 
+CODES = os.environ["CODES_MAILBOX"]
+
+
 def emailed_code(address, timeout=60):
-    """The newest sign-in code emailed to `address` that this test run hasn't used yet."""
+    """The newest sign-in code for login `address` (sent to the CODES mailbox) not used yet."""
     host = urlsplit(BASE).hostname
     deadline = time.time() + timeout
     while time.time() < deadline:
         with imaplib.IMAP4_SSL(host, 993, ssl_context=ssl.create_default_context()) as im:
-            im.login(address, MAILBOX_PW[address])
+            im.login(CODES, os.environ["CODES_PASSWORD"])
             im.select("INBOX")
-            _, data = im.search(None, "SUBJECT", '"Your sign-in code"')
+            _, data = im.search(None, "SUBJECT", '"Your sign-in code"', "BODY", f'"for {address}"')
             for num in reversed(data[0].split()):
                 _, hdr = im.fetch(num, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
                 m = re.search(rb"Your sign-in code: (\d{6})", hdr[0][1])
@@ -80,8 +85,14 @@ class Browser:
         page_html = self.c.get(page).text
         return self.c.post(path, data={"csrf": self.csrf(page_html), **data})
 
+    def post_login(self, email, password, next_="/"):
+        """Submit the sign-in form the way a browser does (it carries the page's login token)."""
+        page = self.c.get("/login")
+        pre = re.search(r'name="pre" value="([^"]+)"', page.text).group(1)
+        return self.c.post("/login", data={"email": email, "password": password, "next": next_, "pre": pre})
+
     def login(self, email, password, next_="/"):
-        r = self.c.post("/login", data={"email": email, "password": password, "next": next_})
+        r = self.post_login(email, password, next_)
         if r.status_code != 303:
             return r
         if r.headers["location"].startswith("/login/code"):
@@ -104,7 +115,7 @@ class Browser:
     def enable_two_step(self, email):
         """Two-step verification by email codes."""
         page = self.c.get("/security")
-        r = self.c.post("/security/two-step/email/start", data={"csrf": self.csrf(page.text)})
+        r = self.c.post("/security/two-step/email/start", data={"csrf": self.csrf(page.text), "address": CODES})
         assert r.status_code == 200 and "We emailed a 6-digit code" in r.text, r.text[:500]
         r = self.c.post("/security/two-step/email/confirm", data={"csrf": self.csrf(r.text), "code": emailed_code(email)})
         codes = re.findall(r"<code>([0-9a-f]{6}-[0-9a-f]{6})</code>", r.text)
@@ -118,7 +129,7 @@ class Browser:
         page = self.c.get("/tokens")
         r = self.c.post("/tokens", data={"csrf": self.csrf(page.text), **data})
         m = re.search(r"mm_pat_[\w-]+", r.text)
-        assert m, r.text[:800]
+        assert m, re.findall(r'class="notice [a-z]+">([^<]+)', r.text) or r.text[:800]
         return m.group(0)
 
 
@@ -207,7 +218,9 @@ MAILBOX_PW[ADMIN] = os.environ["ADMIN_MAILBOX_PASSWORD"]
 def test_02_admin_first_login_forces_new_password():
     b = Browser()
     r = b.login(os.environ["ADMIN_EMAIL"], "wrong-password-123")
-    assert r.status_code == 401 and "Wrong email or password" in r.text
+    assert r.status_code == 401 and "sign you in" in r.text
+    # the sign-in form only works with the token from our own login page (login CSRF)
+    assert b.c.post("/login", data={"email": ADMIN, "password": "x", "next": "/"}).status_code == 303
     r = b.login(os.environ["ADMIN_EMAIL"], os.environ["ADMIN_PASSWORD"])
     assert r.status_code == 303
     cookie = r.headers["set-cookie"]
@@ -216,6 +229,10 @@ def test_02_admin_first_login_forces_new_password():
     assert b.set_password(os.environ["ADMIN_PASSWORD"], "short").status_code == 400
     S["admin_pw"] = "Adm1n-" + secrets.token_urlsafe(12)
     assert b.set_password(os.environ["ADMIN_PASSWORD"], S["admin_pw"]).status_code == 303
+    # one password: the admin's login is also a mailbox, and now both use the new password
+    MAILBOX_PW[ADMIN] = S["admin_pw"]
+    with imaplib.IMAP4_SSL(urlsplit(BASE).hostname, 993) as im:
+        im.login(ADMIN, S["admin_pw"])
     home = b.get("/")
     # 200, or the two-step setup page if the server already requires two-step for everyone
     assert home.status_code == 200 or home.headers["location"] == "/security?required=1"
@@ -224,10 +241,15 @@ def test_02_admin_first_login_forces_new_password():
 
 def test_03_admin_two_step_and_token():
     b = S["admin"]
+    # codes can't go to the mailbox you sign in as: it has the same password
+    page = b.get("/security")
+    for own in (ADMIN, ADMIN.replace("@", "+codes@")):
+        r = b.c.post("/security/two-step/email/start", data={"csrf": b.csrf(page.text), "address": own})
+        assert r.status_code == 400 and "own mailbox" in r.text, own
     _, S["admin_recovery"] = b.enable_two_step(ADMIN)
     # start from "two-step optional"; test_24 switches the requirement back on
     page = b.get("/admin/settings")
-    assert b.c.post("/admin/settings", data={"csrf": b.csrf(page.text)}).status_code == 303
+    assert b.c.post("/admin/settings", data={"csrf": b.csrf(page.text), "allow_local": "1"}).status_code == 303
     r = b.post_form("/tokens", "/tokens", {"name": "x", "days": "30", "scopes": ["mail.read"], "code": "000000"})
     assert r.status_code == 400                                    # token needs a valid two-step code
     S["admin_token"] = b.create_token("e2e admin", ["mail.read", "mail.send", "mail.organize", "admin"], ADMIN)
@@ -271,6 +293,9 @@ def test_06_user_signs_in_and_gets_token():
     assert b.login(S["U"], S["U_temp"]).status_code == 303
     S["U_pw"] = "Us3r-" + secrets.token_urlsafe(12)
     assert b.set_password(S["U_temp"], S["U_pw"]).status_code == 303
+    MAILBOX_PW[S["U"]] = S["U_pw"]                     # same password for the user's mailbox now
+    with imaplib.IMAP4_SSL(urlsplit(BASE).hostname, 993) as im:
+        im.login(S["U"], S["U_pw"])
     S["user"] = b
     S["user_token"] = b.create_token("e2e user", ["mail.read", "mail.send", "mail.organize", "admin"])
     me = ok(api(S["user_token"], "GET", "/me"))
@@ -545,7 +570,9 @@ def test_17_mcp_admin_tools():
             assert err and "confirm" in str(data), data
         else:
             assert not err, (name, data)
-    assert res[1][1]["temporary_password"] and res[2][1]["password"] and res[2][1]["ready"]
+    # passwords never reach the AI
+    assert "not shown" in res[1][1]["temporary_password"] and "not shown" in res[2][1]["password"]
+    assert res[2][1]["ready"] and "not shown" in res[6][1]["password"]
     assert any(a["alias"] == addr("c-alias") for a in res[8][1])
     assert newbox in [m["address"] for m in res[9][1]]
     assert res[12][1]["deleted"] == newbox
@@ -558,13 +585,14 @@ def test_17_mcp_admin_tools():
 def test_18_oauth_full_flow_with_pkce_and_two_step():
     meta = httpx.get(f"{BASE}/.well-known/oauth-authorization-server").json()
     assert "S256" in meta["code_challenge_methods_supported"]
-    bad = httpx.post(meta["registration_endpoint"], json={"redirect_uris": ["http://evil.example/cb"],
-                                                          "client_name": "evil"})
-    assert bad.status_code == 400
+    for evil in ("http://evil.example/cb", "http://localhost.evil.example/cb", "http://user@localhost/cb",
+                 "https://claude.ai@evil.example/cb", "javascript:alert(1)"):
+        bad = httpx.post(meta["registration_endpoint"], json={"redirect_uris": [evil], "client_name": "evil"})
+        assert bad.status_code == 400, evil
     reg = httpx.post(meta["registration_endpoint"], json={
         "redirect_uris": ["http://localhost:53682/callback"], "client_name": f"e2e client {RUN}",
         "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
-        "token_endpoint_auth_method": "none"}).json()
+        "token_endpoint_auth_method": "none", "scope": "mail.read mail.send mail.organize admin"}).json()
     cid = reg["client_id"]
     verifier, challenge = pkce()
     state = secrets.token_urlsafe(8)
@@ -581,14 +609,15 @@ def test_18_oauth_full_flow_with_pkce_and_two_step():
     assert anon.get(path).headers["location"].startswith("/login?next=")
     b = S["admin"]
     page = b.get(path)
-    assert page.status_code == 200 and f"e2e client {RUN}" in page.text and "localhost:53682" in page.text
+    assert page.status_code == 200 and f"e2e client {RUN}" in page.text and "<code>localhost</code>" in page.text
     assert "form-action 'self' http://localhost:53682" in page.headers["content-security-policy"]
     rid = re.search(r'name="request_id" value="([^"]+)"', page.text).group(1)
     wrong = b.c.post("/oauth/consent", data={"csrf": b.csrf(page.text), "request_id": rid, "decision": "approve",
                                              "code": "000000"})
     assert wrong.status_code == 401
+    assert 'name="allow_admin"' in page.text and "checked" not in page.text.split('name="allow_admin"')[1][:30]
     r = b.c.post("/oauth/consent", data={"csrf": b.csrf(page.text), "request_id": rid, "decision": "approve",
-                                         "code": b.fresh_code(ADMIN, path)})
+                                         "code": b.fresh_code(ADMIN, path), "allow_admin": "1"})
     assert r.status_code == 303
     cb = urlsplit(r.headers["location"])
     q = parse_qs(cb.query)
@@ -646,9 +675,10 @@ def test_19_oauth_deny_and_revoke():
     r = b.c.post("/oauth/consent", data={"csrf": b.csrf(page.text), "request_id": rid, "decision": "deny"})
     q = parse_qs(urlsplit(r.headers["location"]).query)
     assert q["error"] == ["access_denied"] and q["state"] == ["s1"]
-    # revoke from the console's "Connected apps" list
-    tok = _authorize(b, meta, cid, verifier, challenge)
-    assert api(tok["access_token"], "GET", "/me").status_code == 200
+    # revoke from the console's "Connected apps" list; admin wasn't ticked, so it isn't granted
+    tok = _authorize(b, meta, cid, verifier, challenge, scope="mail.read admin")
+    assert ok(api(tok["access_token"], "GET", "/me"))["scopes"] == ["mail.read"]
+    assert api(tok["access_token"], "GET", "/admin/users").status_code == 403
     page = b.get("/tokens")
     assert f"e2e client {RUN}" in page.text
     gid = re.findall(r'action="/tokens/apps/([0-9a-f]{24})/revoke"', page.text)[0]
@@ -667,10 +697,10 @@ def test_19_oauth_deny_and_revoke():
     assert api(tok["access_token"], "GET", "/me").status_code == 401
 
 
-def _authorize(b, meta, cid, verifier, challenge, secret=None):
+def _authorize(b, meta, cid, verifier, challenge, secret=None, scope=None):
     r = httpx.get(meta["authorization_endpoint"], params={
         "response_type": "code", "client_id": cid, "redirect_uri": "http://localhost:53682/callback",
-        "code_challenge": challenge, "code_challenge_method": "S256", "state": "s2"})
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": "s2", **({"scope": scope} if scope else {})})
     path = r.headers["location"][len(BASE):]
     page = b.get(path)
     rid = re.search(r'name="request_id" value="([^"]+)"', page.text).group(1)
@@ -696,9 +726,9 @@ def test_20_csrf_xss_open_redirect():
     page = b.get("/admin/users").text
     assert "Test <b>User</b>" not in page and "Test &lt;b&gt;User&lt;/b&gt;" in page
     fresh = Browser()
-    r = fresh.c.post("/login", data={"email": S["U"], "password": S["U_pw"], "next": "//evil.example/x"})
+    r = fresh.post_login(S["U"], S["U_pw"], "//evil.example/x")
     assert r.headers["location"] == "/"
-    r = fresh.c.post("/login", data={"email": S["U"], "password": S["U_pw"], "next": "https://evil.example"})
+    r = fresh.post_login(S["U"], S["U_pw"], "https://evil.example")
     assert r.headers["location"] == "/"
     # API is not usable with a browser cookie, and the console doesn't accept bearer tokens
     assert fresh.c.get("/api/v1/me").status_code == 401
@@ -713,8 +743,8 @@ def test_21_lockout_after_failed_passwords():
     b = Browser()
     for _ in range(5):
         assert b.login(victim, "Wrong-password-xyz").status_code == 401
-    r = b.login(victim, temp)
-    assert r.status_code == 401 and "locked" in r.text
+    r = b.login(victim, temp)       # the right password is refused while locked, with the same message
+    assert r.status_code == 401 and "sign you in" in r.text
     uid = next(u["id"] for u in ok(api(t, "GET", "/admin/users")) if u["email"] == victim)
     ok(api(t, "DELETE", f"/admin/users/{uid}"))
 
@@ -741,7 +771,7 @@ def test_22_logout_and_disable_end_access():
 def test_23_two_step_codes_work_once_and_recovery_codes():
     def to_code_page():
         b = Browser()
-        r = b.c.post("/login", data={"email": os.environ["ADMIN_EMAIL"], "password": S["admin_pw"], "next": "/"})
+        r = b.post_login(os.environ["ADMIN_EMAIL"], S["admin_pw"])
         page = b.get(r.headers["location"])
         return b, b.csrf(page.text)
 
@@ -767,7 +797,7 @@ def test_23_two_step_codes_work_once_and_recovery_codes():
 def test_24_require_two_step_for_everyone():
     b = S["admin"]
     page = b.get("/admin/settings")
-    r = b.c.post("/admin/settings", data={"csrf": b.csrf(page.text), "require_two_step": "1"})
+    r = b.c.post("/admin/settings", data={"csrf": b.csrf(page.text), "require_two_step": "1", "allow_local": "1"})
     assert r.status_code == 303
     # the user's token was made without two-step: it stops working
     S["user"] = Browser()
@@ -779,6 +809,43 @@ def test_24_require_two_step_for_everyone():
     assert api(new_token, "GET", "/me").status_code == 200
     assert mcp_call(new_token, [("whoami", {})])[0][1]["email"] == S["U"]
     assert api(S["admin_token"], "GET", "/me").status_code == 200        # admin's token was made with two-step
+
+
+def test_25_hardening():
+    t = S["admin_token"]
+    # oversized requests are refused before the app reads them
+    big = httpx.post(f"{BASE}/api/v1/admin/aliases", headers={"Authorization": f"Bearer {t}"},
+                     content=b"x" * (200 * 1024), timeout=60)
+    assert big.status_code == 413
+    # attachments always download as files, whatever the sender claimed
+    a = api(t, "GET", f"/mailboxes/{S['A']}/messages/{S['uid1']}/attachments/0")
+    assert a.headers["content-type"] == "application/octet-stream" and "attachment;" in a.headers["content-disposition"]
+    # a new password signs out everything, including tokens
+    b = Browser()
+    victim = addr("pwchange")
+    MAILBOX_PW[victim] = ok(api(t, "POST", "/admin/mailboxes", json={"address": victim}), 201)["password"]
+    r = ok(api(t, "POST", "/admin/users", json={"email": victim}), 201)
+    vid = r["user"]["id"]
+    assert b.login(victim, r["temporary_password"]).status_code == 303
+    pw1 = "Vict1m-" + secrets.token_urlsafe(10)
+    b.set_password(r["temporary_password"], pw1)
+    b = Browser()
+    assert b.login(victim, pw1).status_code == 303
+    b.enable_two_step(victim)
+    tok = b.create_token("t", ["mail.read"], victim)
+    assert api(tok, "GET", "/me").status_code == 200
+    pw2 = "Vict1m-" + secrets.token_urlsafe(10)
+    assert b.set_password(pw1, pw2).status_code == 303
+    assert api(tok, "GET", "/me").status_code == 401
+    # one password: the mailbox follows; disabling the person also locks the mailbox
+    with imaplib.IMAP4_SSL(urlsplit(BASE).hostname, 993) as im:
+        im.login(victim, pw2)
+    ok(api(t, "PATCH", f"/admin/users/{vid}", json={"disabled": True}))
+    with pytest.raises(imaplib.IMAP4.error):
+        with imaplib.IMAP4_SSL(urlsplit(BASE).hostname, 993) as im:
+            im.login(victim, pw2)
+    ok(api(t, "DELETE", f"/admin/users/{vid}"))
+    ok(api(t, "DELETE", f"/admin/mailboxes/{victim}", params={"confirm": victim}))
 
 
 # ---------- 6. cleanup -------------------------------------------------------------------------------

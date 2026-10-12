@@ -29,9 +29,11 @@ Console, REST API and MCP  (https://MAIL_HOST)
   app-admin <email>            create an admin login for the console; prints a temporary password
   app-link <address>           let the console use an existing mailbox (password from SECRETS_DIR)
   app-reset-two-step <email>   remove two-step verification from a login (lost phone)
+  app-test-cleanup             remove test mailboxes/logins left by an interrupted test run
   app-unblock <ip>             clear the failed sign-in limit for a network address
   app-test                     run the console/API/MCP/OAuth test suite against the server
   app-test-claude              let Claude Code use the MCP server for real, then check its work
+  app-test-scenarios [kind]    100 realistic requests to Claude through MCP (draft/confirm/send, reading, ...)
 
 Running it
   status                       services, mail queue, disk, certificate
@@ -58,6 +60,10 @@ fi
 if [[ $cmd == help || $cmd == -h || $cmd == --help ]]; then usage; exit 0; fi
 
 source "$HERE/scripts/common.sh"
+
+# arguments end up inside commands run on the server: accept only plain addresses / IPs
+email_arg() { [[ ${1:-} =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "not an email address: ${1:-}" >&2; exit 1; }; echo "$1"; }
+ip_arg() { [[ ${1:-} =~ ^[0-9a-fA-F:.]+$ ]] || { echo "not an IP address: ${1:-}" >&2; exit 1; }; echo "$1"; }
 
 case "$cmd" in
   server-setup)
@@ -95,38 +101,51 @@ EOF
   backup)
     remote "cd '$REMOTE_DIR' && scripts/backup.sh" ;;
   unban)
-    ip=${1:?give the IP address}
+    ip=$(ip_arg "${1:-}")
     for j in dovecot postfix custom; do remote "docker exec mailserver fail2ban-client set $j unbanip $ip" 2>/dev/null || true; done
     echo "unbanned $ip" ;;
   app-admin)
-    remote "docker exec mailapp python -m mailapp.cli create-admin '${1:?give the admin email}'" ;;
+    a=$(email_arg "${1:-}"); remote "docker exec mailapp python -m mailapp.cli create-admin '$a'" ;;
   app-link)
-    a=${1:?give the mailbox address}
+    a=$(email_arg "${1:-}")
     [[ -f $SECRETS_DIR/$a.txt ]] || { echo "no saved password in $SECRETS_DIR/$a.txt" >&2; exit 1; }
     remote "docker exec -i mailapp python -m mailapp.cli link-mailbox '$a'" < "$SECRETS_DIR/$a.txt" ;;
+  app-test-cleanup)
+    remote "docker exec mailapp python -m mailapp.cli cleanup-tests e2e-"
+    rm -f "$SECRETS_DIR"/e2e-*.txt ;;
   app-unblock)
-    remote "docker exec mailapp python -m mailapp.cli unblock-ip '${1:?give the IP address}'" ;;
-  app-test|app-test-claude)
+    ip=$(ip_arg "${1:-}"); remote "docker exec mailapp python -m mailapp.cli unblock-ip '$ip'" ;;
+  app-test|app-test-claude|app-test-scenarios)
     venv=$HERE/.venv-test
     # the suite fails sign-ins on purpose; start each run with a clean limit for this network
     myip=$(curl -s -m 10 https://api.ipify.org || true)
-    [[ -n $myip ]] && remote "docker exec mailapp python -m mailapp.cli unblock-ip '$myip'" >/dev/null
+    if [[ -n $myip ]]; then
+      remote "docker exec mailapp python -m mailapp.cli unblock-ip '$myip'" >/dev/null
+      # the tests also try one stale mailbox password on purpose; repeated runs would get this IP banned
+      for j in dovecot postfix custom; do remote "docker exec mailserver fail2ban-client set $j unbanip '$myip'" >/dev/null 2>&1 || true; done
+    fi
     [[ -x $venv/bin/python ]] || { python3 -m venv "$venv" && "$venv/bin/pip" -q install -r "$HERE/app/tests/requirements.txt"; }
     # a throwaway admin whose login is also a mailbox, so the tests can read its emailed sign-in codes
     who="e2e-admin-$(openssl rand -hex 3)@$DOMAIN"
+    codes="e2e-codes-$(openssl rand -hex 3)@$DOMAIN"   # sign-in codes go here, never to the login's own mailbox
     "$HERE/scripts/account.sh" add "$who" >/dev/null
+    "$HERE/scripts/account.sh" add "$codes" >/dev/null
+    remote "docker exec mailapp python -m mailapp.cli allow-local-code-mailboxes on" >/dev/null
     out=$(remote "docker exec mailapp python -m mailapp.cli create-admin '$who'")
     pw=$(sed -n 's/^temporary password: //p' <<<"$out")
     status=0
     BASE_URL="https://$MAIL_HOST" DOMAIN="$DOMAIN" ADMIN_EMAIL="$who" ADMIN_PASSWORD="$pw" \
       ADMIN_MAILBOX_PASSWORD="$(cat "$SECRETS_DIR/$who.txt")" \
+      CODES_MAILBOX="$codes" CODES_PASSWORD="$(cat "$SECRETS_DIR/$codes.txt")" \
       bash -c 'if [[ $0 == app-test ]]; then exec "$1/bin/python" -m pytest -q "$2/app/tests/test_live.py" "${@:3}";
-               else exec "$1/bin/python" "$2/app/tests/claude_check.py"; fi' "$cmd" "$venv" "$HERE" "$@" || status=$?
+               elif [[ $0 == app-test-claude ]]; then exec "$1/bin/python" "$2/app/tests/claude_check.py";
+               else exec "$1/bin/python" "$2/app/tests/claude_scenarios.py" "${@:3}"; fi' "$cmd" "$venv" "$HERE" "$@" || status=$?
     remote "docker exec mailapp python -m mailapp.cli delete-user '$who'" >/dev/null
-    dms email del -y "$who" >/dev/null 2>&1; rm -f "$SECRETS_DIR/$who.txt"
+    remote "docker exec mailapp python -m mailapp.cli allow-local-code-mailboxes off" >/dev/null
+    for m in "$who" "$codes"; do dms email del -y "$m" >/dev/null 2>&1; rm -f "$SECRETS_DIR/$m.txt"; done
     exit $status ;;
   app-reset-two-step)
-    remote "docker exec mailapp python -m mailapp.cli reset-two-step '${1:?give the email}'" ;;
+    a=$(email_arg "${1:-}"); remote "docker exec mailapp python -m mailapp.cli reset-two-step '$a'" ;;
   ssh)
     ssh "${SSH_OPTS[@]/BatchMode=yes/BatchMode=no}" -t "$SSH_TARGET" "cd '$REMOTE_DIR'; exec bash -l" ;;
   *)

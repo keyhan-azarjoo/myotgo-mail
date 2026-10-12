@@ -21,6 +21,7 @@ def main():
     assert admin.login(t.ADMIN, os.environ["ADMIN_PASSWORD"]).status_code == 303
     pw = "Adm1n-" + os.urandom(8).hex()
     assert admin.set_password(os.environ["ADMIN_PASSWORD"], pw).status_code == 303
+    t.MAILBOX_PW[t.ADMIN] = pw          # the login and its mailbox share one password
     admin.enable_two_step(t.ADMIN)
     token = admin.create_token("claude check", ["mail.read", "mail.send", "mail.organize", "admin"], t.ADMIN)
     a, b = t.addr("claude-a"), t.addr("claude-b")

@@ -1,18 +1,5 @@
 {% extends "base.html" %}
-{% block title %}API & MCP tokens · {{ app_name }}<h2>Connected apps</h2>
-<p class="muted small">Apps you allowed through the sign-in page, such as Claude. Revoking signs the app out at once.</p>
-<table>
-  <thead><tr><th>App</th><th>Permissions</th><th>Since</th><th></th></tr></thead>
-  <tbody>
-  {% for g in grants %}
-  <tr><td>{{ g.client }}</td><td>{% for s in g.scopes %}<span class="pill">{{ s }}</span>{% endfor %}</td>
-    <td class="muted small">{{ fmt(g.since) }}</td>
-    <td><form method="post" action="/tokens/apps/{{ g.id }}/revoke"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link danger">Revoke</button></form></td></tr>
-  {% else %}<tr><td colspan="4" class="empty">No connected apps.</td></tr>{% endfor %}
-  </tbody>
-</table>
-<form id="sendcode" method="post" action="/two-step/send-code"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ here }}"></form>
-{% endblock %}
+{% block title %}API & MCP tokens · {{ app_name }}{% endblock %}
 {% block content %}
 <h1>API &amp; MCP tokens</h1>
 <p class="muted">A token lets a program or an AI assistant use your mailboxes over the API or MCP, with no more access than you have.

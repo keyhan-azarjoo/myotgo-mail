@@ -52,13 +52,14 @@ def _read(path: Path) -> list[str]:
 def _write(path: Path, lines: list[str]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text("".join(line + "\n" for line in lines))
-    os.chmod(tmp, 0o644)
+    os.chmod(tmp, 0o640)   # hashes: readable by root (the mail server) only
     os.replace(tmp, path)
 
 
 def _hash(password: str) -> str:
-    # Same scheme `setup email add` uses (doveadm pw -s SHA512-CRYPT, 5000 rounds).
-    return "{SHA512-CRYPT}" + sha512_crypt.using(rounds=5000).hash(password)
+    # SHA512-CRYPT like `setup email add`, but with 200,000 rounds instead of 5,000: the hash is
+    # as slow to crack as it can be while a mail-app sign-in still takes well under a second.
+    return "{SHA512-CRYPT}" + sha512_crypt.using(rounds=200_000).hash(password)
 
 
 # ---------- mailboxes -----------------------------------------------------------------

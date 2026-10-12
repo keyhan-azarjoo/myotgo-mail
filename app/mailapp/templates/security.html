@@ -13,7 +13,7 @@
     <div class="codes">{% for c in recovery_codes %}<code>{{ c }}</code>{% endfor %}</div>
     <p><a class="button" href="/">Continue</a></p>
   {% elif email_setup %}
-    <p>We emailed a 6-digit code to <strong>{{ sent_to }}</strong>.</p>
+    <p>We emailed a 6-digit code to <strong>{{ sent_to }}</strong>. It confirms you can receive codes there.</p>
     <form method="post" action="/security/two-step/email/confirm" class="inline">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Code from the email<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
@@ -33,7 +33,7 @@
     </form>
   {% elif sess.totp_enabled %}
     <p><span class="pill ok">on</span> Signing in, connecting Claude and creating API tokens ask for a code
-      {% if sess.two_step_method == 'email' %}we email to <strong>{{ sess.email }}</strong>{% else %}from your authenticator app{% endif %}.</p>
+      {% if sess.two_step_method == 'email' %}we email to <strong>{{ sess.two_step_email }}</strong>{% else %}from your authenticator app{% endif %}.</p>
     <form method="post" action="/security/two-step/disable" class="inline">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Code<input name="code" inputmode="numeric" required></label>
@@ -41,17 +41,20 @@
     </form>
   {% else %}
     <p><span class="pill warn">off</span> Protect your account with a one-time code in addition to your password. Choose how you get it:</p>
-    <div class="row">
-      <form method="post" action="/security/two-step/email/start">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="primary">Email me codes</button>
-      </form>
-      <form method="post" action="/security/two-step/start">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button>Use an authenticator app</button>
-      </form>
-    </div>
-    <p class="muted small">Email codes go to {{ sess.email }}. An authenticator app (Google/Microsoft Authenticator, 1Password…) also works without email.</p>
+    <h3>Option 1: an authenticator app <span class="pill ok">most secure</span></h3>
+    <p class="muted small">Google Authenticator, Microsoft Authenticator, 1Password, Authy…</p>
+    <form method="post" action="/security/two-step/start">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="primary">Use an authenticator app</button>
+    </form>
+    <h3>Option 2: codes by email</h3>
+    <form method="post" action="/security/two-step/email/start" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Send my codes to<input type="email" name="address" required placeholder="you@gmail.com"></label>
+      <button>Email me codes</button>
+    </form>
+    <p class="muted small">{% if is_mailbox %}Use an address other than {{ sess.email }}: that mailbox has the same password
+      as your sign-in, so codes sent there wouldn't protect you if the password leaked.{% else %}Use an address only you can read.{% endif %}</p>
   {% endif %}
 </section>
 

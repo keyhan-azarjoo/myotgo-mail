@@ -16,6 +16,11 @@
     </select>
   </label>
   <p class="muted small">Usually a no-reply@ mailbox. It must be linked on the Mail setup page.</p>
+  <label class="check"><input type="checkbox" name="allow_local" value="1" {{ 'checked' if allow_local }}>
+    <span>Allow codes to go to a dedicated mailbox on this server</span></label>
+  <p class="muted small">Off by default: codes should go outside this server (or come from an authenticator app),
+  because its mailboxes open with passwords that also open the console. Never to the person's own mailbox,
+  a +address or an alias.</p>
   <button class="primary">Save</button>
 </form>
 {% endblock %}

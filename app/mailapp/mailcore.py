@@ -238,13 +238,16 @@ def search(client: IMAPClient, folder: str, *, text=None, from_=None, to=None, s
 def _fetch_raw(client: IMAPClient, folder: str, uid: int, mark_seen: bool) -> tuple[bytes, list[str]]:
     folder = require_folder(client, folder)
     client.select_folder(folder, readonly=not mark_seen)
+    size = client.fetch([int(uid)], [b"RFC822.SIZE"]).get(int(uid))
+    if not size:
+        raise MailError(f"No message with uid {uid} in '{folder}'.")
+    if (size.get(b"RFC822.SIZE") or 0) > 50 * 1024 * 1024:
+        raise MailError("That message is larger than 50 MB.")
     key = b"BODY[]" if mark_seen else b"BODY.PEEK[]"
-    data = client.fetch([int(uid)], [key, b"FLAGS", b"RFC822.SIZE"])
+    data = client.fetch([int(uid)], [key, b"FLAGS"])
     item = data.get(int(uid))
     if not item:
         raise MailError(f"No message with uid {uid} in '{folder}'.")
-    if (item.get(b"RFC822.SIZE") or 0) > 50 * 1024 * 1024:
-        raise MailError("That message is larger than 50 MB.")
     flags = [f.decode() if isinstance(f, bytes) else str(f) for f in item.get(b"FLAGS", ())]
     return item[b"BODY[]"], flags
 
