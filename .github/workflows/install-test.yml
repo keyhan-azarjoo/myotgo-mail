@@ -27,3 +27,29 @@ jobs:
         run: |
           sudo docker logs mailapp --tail 200 || true
           sudo docker logs mailserver --tail 200 || true
+
+  one-liner:
+    # exactly what a new user runs: the installer and the code from GitHub, the published app image
+    if: github.event_name != 'pull_request'
+    needs: install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: curl | bash, as in the README
+        run: |
+          ip=$(hostname -I | awk '{print $1}')
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh | \
+            sudo env DOMAIN=example.test ADMIN_EMAIL=admin@example.test ACME_EMAIL=ops@example.org \
+              SERVER_IP="$ip" CERT_METHOD=selfsigned MAILSERVER_REPO=https://github.com/${{ github.repository }}.git \
+              bash -s -- --yes
+      - name: The published app image was used (nothing built)
+        run: sudo docker inspect mailapp --format '{{.Config.Image}}' | grep -q '^ghcr.io/'
+      - name: Mail server test
+        run: sudo mailctl test admin@example.test
+      - name: Console, API, MCP and OAuth tests
+        run: sudo mailctl test-app
+      - name: Logs on failure
+        if: failure()
+        run: |
+          sudo docker logs mailapp --tail 200 || true
+          sudo docker logs mailserver --tail 200 || true
