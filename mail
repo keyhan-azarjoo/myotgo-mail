@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# One command for everything. Run it from this folder on your own computer:  ./mail help
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+usage() {
+  cat <<'EOF'
+Usage: ./mail <command>
+
+Set up (in this order the first time)
+  init                         create mail.conf from the example, then edit it
+  server-setup                 prepare a fresh server: Docker, firewall, swap, SSH keys only
+  deploy                       install or update the mail server (safe to run again)
+  add <address>                create a mailbox; prints its password once
+  dns records                  the DNS records to create, with exact values
+  dns check                    check those records on public DNS
+  test <address> [--external you@gmail.com]   end-to-end test of the server
+
+Mailboxes
+  add <address>                new mailbox
+  passwd <address>             new password for a mailbox
+  del <address>                delete a mailbox and all its mail
+  alias <from> <to>            forward <from> to <to>
+  unalias <from> <to>          remove that forward
+  list                         mailboxes and aliases
+  outlook <address>            settings to type into Outlook / any mail app
+
+Running it
+  status                       services, mail queue, disk, certificate
+  logs                         follow the mail log (Ctrl+C to stop)
+  queue                        mail waiting to be sent;  queue flush  retries it now
+  backup                       make a backup now (one is made every night)
+  unban <ip>                   unblock an address banned after wrong passwords
+  ssh                          open a shell on the server
+
+DNS automation (GoDaddy only; other providers: use `dns records` and set them by hand)
+  dns prepare | spf | switch | rollback | show
+EOF
+}
+
+cmd=${1:-help}
+[[ $# -gt 0 ]] && shift
+
+if [[ $cmd == init ]]; then
+  if [[ -f $HERE/mail.conf ]]; then echo "mail.conf already exists"; else
+    cp "$HERE/mail.conf.example" "$HERE/mail.conf" && echo "created mail.conf: open it and fill in your values"
+  fi
+  exit 0
+fi
+if [[ $cmd == help || $cmd == -h || $cmd == --help ]]; then usage; exit 0; fi
+
+source "$HERE/scripts/common.sh"
+
+case "$cmd" in
+  server-setup)
+    remote "MAIL_HOST='$MAIL_HOST' SERVER_IP='$SERVER_IP' bash -s" < "$HERE/scripts/server-setup.sh" ;;
+  deploy)
+    "$HERE/scripts/deploy.sh" ;;
+  add|passwd|del|alias|unalias|list)
+    "$HERE/scripts/account.sh" "$cmd" "$@" ;;
+  outlook)
+    a=${1:?give the address, e.g. ./mail outlook you@$DOMAIN}
+    cat <<EOF
+Account type ........ IMAP
+Email / user name ... $a
+Password ............ $( [[ -f $SECRETS_DIR/$a.txt ]] && echo "in $SECRETS_DIR/$a.txt" || echo "the one you set")
+Incoming (IMAP) ..... $MAIL_HOST   port 993   SSL/TLS
+Outgoing (SMTP) ..... $MAIL_HOST   port 465   SSL/TLS   (or 587 with STARTTLS)
+Outgoing sign-in .... yes, same user name and password
+EOF
+    ;;
+  dns)
+    python3 "$HERE/scripts/dns.py" "${1:-}" ;;
+  test)
+    a=${1:?give the mailbox to test with, e.g. ./mail test you@$DOMAIN}; shift
+    MAIL_USER=$a python3 "$HERE/tests/check.py" "$@" ;;
+  status)
+    remote "cd '$REMOTE_DIR' && docker compose ps --format '{{.Name}}: {{.Status}}' && echo &&
+      docker exec mailserver supervisorctl status | awk '{print \$1\": \"\$2}' | grep -v STOPPED && echo &&
+      docker exec mailserver postqueue -p | tail -1 && df -h / | awk 'NR==2{print \"disk: \"\$3\" used, \"\$4\" free\"}' &&
+      openssl x509 -enddate -noout -in data/certs/$MAIL_HOST.crt" ;;
+  logs)
+    remote "docker exec mailserver tail -f /var/log/mail/mail.log" ;;
+  queue)
+    if [[ ${1:-} == flush ]]; then remote "docker exec mailserver postqueue -f" && echo "retrying now"
+    else remote "docker exec mailserver postqueue -p"; fi ;;
+  backup)
+    remote "cd '$REMOTE_DIR' && scripts/backup.sh" ;;
+  unban)
+    ip=${1:?give the IP address}
+    for j in dovecot postfix custom; do remote "docker exec mailserver fail2ban-client set $j unbanip $ip" 2>/dev/null || true; done
+    echo "unbanned $ip" ;;
+  ssh)
+    ssh "${SSH_OPTS[@]/BatchMode=yes/BatchMode=no}" -t "$SSH_TARGET" "cd '$REMOTE_DIR'; exec bash -l" ;;
+  *)
+    usage; exit 1 ;;
+esac

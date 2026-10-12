@@ -1,0 +1,9 @@
+# Overrides for docker-mailserver's fail2ban (6 failed logins => banned).
+# `./mail deploy` copies this into the server's config, replacing SERVER_IP.
+[DEFAULT]
+# The server itself (tests can run from it) and localhost are never banned.
+ignoreip = 127.0.0.1/8 SERVER_IP
+# A ban lasts one day, so a mistyped password in a mail app doesn't lock you out for a week.
+bantime = 1d
+findtime = 1h
+maxretry = 6

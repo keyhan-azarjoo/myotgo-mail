@@ -1,0 +1,7 @@
+# Your own settings and anything secret: never committed
+mail.conf
+.env
+data/
+secrets/
+*.env.local
+__pycache__/

@@ -1,0 +1,4 @@
+# Extra Postfix settings; docker-mailserver merges this into main.cf.
+# Most small servers have no working IPv6 for mail, so only deliver over IPv4.
+# Remove this line if your server has IPv6 with a reverse DNS entry.
+inet_protocols = ipv4

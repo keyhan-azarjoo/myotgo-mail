@@ -1,0 +1,34 @@
+# The mail server. `./mail deploy` writes the .env file next to this one on the server
+# (MAIL_HOST, DOMAIN), so nothing here is specific to one domain.
+services:
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:16.0.1
+    container_name: mailserver
+    hostname: ${MAIL_HOST:?set MAIL_HOST in .env}
+    env_file: mailserver.env
+    environment:
+      OVERRIDE_HOSTNAME: ${MAIL_HOST}
+      POSTMASTER_ADDRESS: postmaster@${DOMAIN:?set DOMAIN in .env}
+      SSL_CERT_PATH: /etc/mailcerts/${MAIL_HOST}.crt
+      SSL_KEY_PATH: /etc/mailcerts/${MAIL_HOST}.key
+    ports:
+      - "25:25"     # incoming mail from other servers
+      - "465:465"   # sending from mail apps (TLS)
+      - "587:587"   # sending from mail apps (STARTTLS)
+      - "993:993"   # reading mail (IMAP over TLS)
+    volumes:
+      - ./data/mail-data/:/var/mail/
+      - ./data/mail-state/:/var/mail-state/
+      - ./data/mail-logs/:/var/log/mail/
+      - ./data/config/:/tmp/docker-mailserver/
+      - ./data/certs/:/etc/mailcerts/:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    stop_grace_period: 1m
+    cap_add:
+      - NET_ADMIN   # fail2ban
+    healthcheck:
+      test: "ss --listening --tcp | grep -P 'LISTEN.+:smtp' || exit 1"
+      timeout: 3s
+      retries: 0
+    mem_limit: 700m

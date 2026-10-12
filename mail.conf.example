@@ -1,0 +1,47 @@
+# Copy this file to mail.conf and fill in your values:   cp mail.conf.example mail.conf
+# mail.conf is ignored by git, so your details never end up in the repository.
+
+# Your domain: addresses will look like name@DOMAIN
+DOMAIN=example.com
+
+# The mail server's own name. Create a DNS "A" record for it pointing to SERVER_IP.
+MAIL_HOST=mx.example.com
+
+# Public IPv4 address of your server
+SERVER_IP=203.0.113.10
+
+# How to reach the server over SSH (a root login with an SSH key)
+SSH_TARGET=root@203.0.113.10
+SSH_KEY=~/.ssh/id_ed25519
+
+# Folder on the server where the mail server lives
+REMOTE_DIR=/opt/mailserver
+
+# Folder on YOUR computer for mailbox passwords and DNS backups (never in git)
+SECRETS_DIR=~/.mail-secrets
+
+# Let's Encrypt contact address (expiry warnings go here)
+ACME_EMAIL=admin@example.com
+
+# How to get the TLS certificate:
+#   http  - simplest. Uses port 80 on the server for a few seconds. Pick this if nothing
+#           else on the server uses port 80 (true for a dedicated mail server).
+#   dns   - uses your DNS provider's API. Needed if port 80 is taken by a website.
+CERT_METHOD=http
+
+# Only for CERT_METHOD=dns, or to let `./mail dns ...` change records for you:
+#   DNS_PROVIDER     - a lego provider code: godaddy, cloudflare, digitalocean, route53, ovh, ...
+#                      full list: https://go-acme.github.io/lego/dns/
+#   DNS_CREDENTIALS  - a KEY=VALUE file with that provider's API keys, e.g. for GoDaddy:
+#                        GODADDY_API_KEY=...
+#                        GODADDY_API_SECRET=...
+# `./mail dns` can edit records automatically for godaddy; for other providers it prints
+# the records for you to add by hand.
+DNS_PROVIDER=
+DNS_CREDENTIALS=~/.mail-secrets/dns.env
+
+# DKIM selector name (the DNS record will be <selector>._domainkey.DOMAIN)
+DKIM_SELECTOR=mail
+
+# Addresses that forward to the first mailbox you create (comma separated, optional)
+DEFAULT_ALIASES=postmaster,abuse
