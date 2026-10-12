@@ -29,6 +29,9 @@ IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
 SMTP_HOST = os.environ.get("SMTP_HOST", MAIL_HOST)
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
 
+# Only for test installs (CERT_METHOD=selfsigned): the private CA that signed the test certificate.
+MAIL_CA_FILE = os.environ.get("MAIL_CA_FILE", "").strip()
+
 TLS_CERT = os.environ.get("TLS_CERT", f"/certs/{MAIL_HOST}.crt")
 TLS_KEY = os.environ.get("TLS_KEY", f"/certs/{MAIL_HOST}.key")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8443"))

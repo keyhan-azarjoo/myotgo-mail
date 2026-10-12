@@ -21,11 +21,15 @@ import uuid
 from email.message import EmailMessage
 from pathlib import Path
 
+ON_SERVER = os.environ.get("ON_SERVER") == "1"      # set by `mailctl test`
+CA = os.environ.get("MAIL_CA_FILE")                 # only for test installs with a private CA
+if CA:
+    os.environ["SSL_CERT_FILE"] = CA
 HOST = os.environ["MAIL_HOST"]
 DOMAIN = os.environ["DOMAIN"]
 USER = os.environ["MAIL_USER"]
-SERVER = os.environ["SSH_TARGET"]
-SSH_KEY = os.environ["SSH_KEY"]
+SERVER = os.environ.get("SSH_TARGET", "")
+SSH_KEY = os.environ.get("SSH_KEY", "")
 SECRETS = Path(os.environ["SECRETS_DIR"])
 REMOTE_DIR = os.environ["REMOTE_DIR"]
 ALIAS = f"postmaster@{DOMAIN}"  # created by the first `./mail add`
@@ -65,8 +69,8 @@ def message(sender, to, token):
 
 
 def on_server(cmd):
-    return subprocess.run(["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", SERVER, cmd],
-                          capture_output=True, text=True, timeout=60).stdout
+    argv = ["bash", "-c", cmd] if ON_SERVER else ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", SERVER, cmd]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=60).stdout
 
 
 def smtp25():

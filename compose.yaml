@@ -45,13 +45,15 @@ services:
         aliases: ["${MAIL_HOST}"]
 
   app:
+    # the published image; `scripts/apply.sh` builds it from ./app instead when APP_BUILD=1
+    image: ${APP_IMAGE:-ghcr.io/keyhan-azarjoo/myotgo-mail-app:latest}
     build: ./app
-    image: mailapp:local
     container_name: mailapp
-    env_file: ./secrets/app.env        # APP_SECRET_KEY, created by ./mail deploy
+    env_file: ./secrets/app.env        # APP_SECRET_KEY, created on first install
     environment:
       MAIL_HOST: ${MAIL_HOST}
       DOMAIN: ${DOMAIN}
+      MAIL_CA_FILE: ${MAIL_CA_FILE:-}  # only for test installs with CERT_METHOD=selfsigned
     ports:
       - "443:8443"   # web console, REST API and MCP (HTTPS)
     volumes:

@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Manage the mail server ON THE SERVER. Installed as /usr/local/bin/mailctl by install.sh.
+#   mailctl help
+set -euo pipefail
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+cd "$HERE"
+[[ -f .env ]] || { echo "No .env in $HERE: run install.sh first." >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "Run mailctl as root (sudo mailctl ...)." >&2; exit 1; }
+set -a; source .env; set +a
+SECRETS_DIR=${SECRETS_DIR:-/root/.mail-secrets}
+export SECRETS_DIR REMOTE_DIR="$HERE" ON_SERVER=1 DKIM_SELECTOR=${DKIM_SELECTOR:-mail}
+[[ -f secrets/dns.env ]] && export DNS_CREDENTIALS="$HERE/secrets/dns.env"
+[[ ${CERT_METHOD:-} == selfsigned && -f data/certs/ca.crt ]] && export MAIL_CA_FILE="$HERE/data/certs/ca.crt"
+
+usage() {
+  cat <<EOF
+Usage: mailctl <command>         (mail for $DOMAIN, server $MAIL_HOST)
+
+Mailboxes
+  add <address>              new mailbox; prints its password once (also saved in $SECRETS_DIR)
+  passwd <address>           new password for a mailbox
+  del <address>              delete a mailbox and all its mail
+  alias <from> <to>          forward <from> to <to>       unalias <from> <to>   remove it
+  list                       mailboxes and aliases
+  outlook <address>          settings to type into Outlook / any mail app
+
+Web console, API and MCP  (https://$MAIL_HOST)
+  admin <email>              create a console admin login; prints a temporary password
+  reset-two-step <email>     remove two-step verification from a login (lost phone)
+  unblock <ip>               clear sign-in limits and mail-server bans for an address
+
+DNS
+  dns records                the DNS records to create, with exact values
+  dns check                  check them on public DNS
+
+Running it
+  status | logs | queue [flush] | backup | restart
+  update                     download the latest version and apply it
+  test <address>             end-to-end test of the mail server (certificates, sending, receiving, security)
+  test-app                   end-to-end test of the console, API, MCP and OAuth (26 tests)
+EOF
+}
+
+email_arg() { [[ ${1:-} =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "not an email address: ${1:-}" >&2; exit 1; }; echo "$1"; }
+local_arg() {
+  local re="^[a-z0-9]([a-z0-9._+-]{0,62}[a-z0-9])?@${DOMAIN//./\\.}$"
+  [[ ${1:-} =~ $re ]] || { echo "give a full address ending in @$DOMAIN" >&2; exit 1; }; echo "$1"; }
+ip_arg() { [[ ${1:-} =~ ^[0-9a-fA-F:.]+$ ]] || { echo "not an IP address: ${1:-}" >&2; exit 1; }; echo "$1"; }
+dms() { docker exec mailserver setup "$@"; }
+app() { docker exec -i mailapp python -m mailapp.cli "$@"; }
+newpass() { python3 -c 'import secrets,string;a=string.ascii_letters+string.digits;print("".join(secrets.choice(a) for _ in range(24)))'; }
+save_pass() { mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"; (umask 077; printf '%s\n' "$2" > "$SECRETS_DIR/$1.txt"); }
+
+cmd=${1:-help}; [[ $# -gt 0 ]] && shift
+case "$cmd" in
+  help|-h|--help) usage ;;
+  add|passwd)
+    a=$(local_arg "${1:-}"); p=$(newpass)
+    first=$(dms email list 2>/dev/null | grep -c '^\* ' || true)
+    printf '%s\n' "$p" | app mailbox-password "$a" >/dev/null   # password on stdin, never on a command line
+    save_pass "$a" "$p"
+    echo "$a  password: $p   (also saved in $SECRETS_DIR/$a.txt)"
+    if [[ $cmd == add && $first == 0 ]]; then
+      for n in postmaster abuse; do dms alias add "$n@$DOMAIN" "$a" && echo "alias $n@$DOMAIN -> $a"; done
+    fi ;;
+  del)
+    a=$(local_arg "${1:-}")
+    read -r -p "Delete $a and ALL its mail? Type the address again to confirm: " again
+    [[ $again == "$a" ]] || { echo "cancelled"; exit 1; }
+    dms email del -y "$a" && rm -f "$SECRETS_DIR/$a.txt" && echo "deleted $a" ;;
+  alias)   a=$(local_arg "${1:-}"); t=$(email_arg "${2:-}"); dms alias add "$a" "$t" && echo "alias $a -> $t" ;;
+  unalias) a=$(local_arg "${1:-}"); t=$(email_arg "${2:-}"); dms alias del "$a" "$t" && echo "removed $a -> $t" ;;
+  list)
+    echo "Mailboxes:"; dms email list 2>/dev/null | grep -E '^\*' | sed 's/^\* /  /'
+    echo "Aliases:";   dms alias list 2>/dev/null | grep -E '^\*' | sed 's/^\* //; s/ / -> /; s/^/  /' ;;
+  outlook)
+    a=$(email_arg "${1:-}")
+    printf 'Account type ........ IMAP\nEmail / user name ... %s\nIncoming (IMAP) ..... %s   port 993   SSL/TLS\nOutgoing (SMTP) ..... %s   port 465   SSL/TLS   (or 587 with STARTTLS)\nOutgoing sign-in .... yes, same user name and password\n' "$a" "$MAIL_HOST" "$MAIL_HOST" ;;
+  admin)
+    a=$(email_arg "${1:-}")
+    out=$(app create-admin "$a"); echo "$out"
+    pw=$(sed -n 's/^temporary password: //p' <<<"$out")
+    if dms email list 2>/dev/null | grep -q "^\* $a "; then
+      printf '%s\n' "$pw" | app mailbox-password "$a" >/dev/null   # one password: the mailbox gets it too
+      save_pass "$a" "$pw"
+      echo "(the mailbox $a uses the same password)"
+    fi
+    echo "Sign in at https://$MAIL_HOST and choose your own password." ;;
+  reset-two-step) a=$(email_arg "${1:-}"); app reset-two-step "$a" ;;
+  unblock)
+    ip=$(ip_arg "${1:-}"); app unblock-ip "$ip"
+    for j in dovecot postfix custom; do docker exec mailserver fail2ban-client set "$j" unbanip "$ip" >/dev/null 2>&1 || true; done
+    echo "unblocked $ip" ;;
+  dns) python3 scripts/dns.py "${1:-}" ;;
+  status)
+    docker compose ps --format '{{.Name}}: {{.Status}}'; echo
+    docker exec mailserver postqueue -p | tail -1
+    df -h / | awk 'NR==2{print "disk: "$3" used, "$4" free"}'
+    openssl x509 -enddate -noout -in "data/certs/$MAIL_HOST.crt" ;;
+  logs) docker exec mailserver tail -f /var/log/mail/mail.log ;;
+  queue) if [[ ${1:-} == flush ]]; then docker exec mailserver postqueue -f && echo "retrying now"; else docker exec mailserver postqueue -p; fi ;;
+  backup) scripts/backup.sh ;;
+  restart) docker compose restart ;;
+  update)
+    if [[ -d .git ]]; then git pull --ff-only; fi
+    scripts/apply.sh && echo "updated" ;;
+  test)
+    a=$(local_arg "${1:-}"); shift
+    [[ -f $SECRETS_DIR/$a.txt ]] || { echo "no saved password for $a in $SECRETS_DIR" >&2; exit 1; }
+    MAIL_USER=$a python3 tests/check.py "$@" ;;
+  test-app)
+    venv=$HERE/.venv-test
+    [[ -x $venv/bin/python ]] || { python3 -m venv "$venv" && "$venv/bin/pip" -q install -r app/tests/requirements.txt; }
+    who="e2e-admin-$(openssl rand -hex 3)@$DOMAIN"; codes="e2e-codes-$(openssl rand -hex 3)@$DOMAIN"
+    for m in "$who" "$codes"; do p=$(newpass); printf '%s\n' "$p" | app mailbox-password "$m" >/dev/null; save_pass "$m" "$p"; done
+    app allow-local-code-mailboxes on >/dev/null
+    pw=$(app create-admin "$who" | sed -n 's/^temporary password: //p')
+    status=0
+    BASE_URL="https://$MAIL_HOST" ADMIN_EMAIL="$who" ADMIN_PASSWORD="$pw" \
+      ADMIN_MAILBOX_PASSWORD="$(cat "$SECRETS_DIR/$who.txt")" \
+      CODES_MAILBOX="$codes" CODES_PASSWORD="$(cat "$SECRETS_DIR/$codes.txt")" \
+      "$venv/bin/python" -m pytest -q app/tests/test_live.py "$@" || status=$?
+    app delete-user "$who" >/dev/null; app allow-local-code-mailboxes off >/dev/null
+    for m in "$who" "$codes"; do dms email del -y "$m" >/dev/null 2>&1; rm -f "$SECRETS_DIR/$m.txt"; done
+    app cleanup-tests e2e- >/dev/null || true
+    exit $status ;;
+  *) usage; exit 1 ;;
+esac

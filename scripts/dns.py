@@ -26,9 +26,10 @@ MAIL_HOST = os.environ["MAIL_HOST"]
 IP = os.environ["SERVER_IP"]
 SELECTOR = os.environ.get("DKIM_SELECTOR", "mail")
 PROVIDER = os.environ.get("DNS_PROVIDER", "")
-SECRETS = Path(os.environ["SECRETS_DIR"])
-CREDS = Path(os.environ["DNS_CREDENTIALS"])
-SSH = ["ssh", "-i", os.environ["SSH_KEY"], "-o", "BatchMode=yes", os.environ["SSH_TARGET"]]
+SECRETS = Path(os.environ.get("SECRETS_DIR", "/root/.mail-secrets"))
+CREDS = Path(os.environ.get("DNS_CREDENTIALS", str(SECRETS / "dns.env")))
+ON_SERVER = os.environ.get("ON_SERVER") == "1"      # set by `mailctl dns ...`
+SSH = [] if ON_SERVER else ["ssh", "-i", os.environ["SSH_KEY"], "-o", "BatchMode=yes", os.environ["SSH_TARGET"]]
 REMOTE_DIR = os.environ["REMOTE_DIR"]
 
 if not MAIL_HOST.endswith("." + DOMAIN):
@@ -39,9 +40,8 @@ HOST = MAIL_HOST[: -len(DOMAIN) - 1]  # "mx"
 # ---------- values -------------------------------------------------------------------
 
 def dkim_value():
-    out = subprocess.run(
-        SSH + [f"cat {REMOTE_DIR}/data/config/rspamd/dkim/rsa-2048-{SELECTOR}-{DOMAIN}.public.dns.txt"],
-        capture_output=True, text=True)
+    path = f"{REMOTE_DIR}/data/config/rspamd/dkim/rsa-2048-{SELECTOR}-{DOMAIN}.public.dns.txt"
+    out = subprocess.run(["cat", path] if ON_SERVER else SSH + [f"cat {path}"], capture_output=True, text=True)
     value = out.stdout.strip()
     if out.returncode or not value.startswith("v=DKIM1;"):
         sys.exit("No DKIM key on the server yet. Run `./mail deploy` and `./mail add <first mailbox>` first.")

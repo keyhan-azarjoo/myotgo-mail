@@ -1,0 +1,35 @@
+# Builds the console/API/MCP app image for Intel and ARM servers and publishes it to
+# ghcr.io/<owner>/myotgo-mail-app, so installs download it instead of building it.
+name: app image
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/image.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: app
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/myotgo-mail-app:latest
+            ghcr.io/${{ github.repository_owner }}/myotgo-mail-app:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Web console, REST API and MCP server for the self-hosted mail server
+            org.opencontainers.image.licenses=MIT

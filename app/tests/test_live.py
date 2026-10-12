@@ -31,6 +31,11 @@ import ssl
 import httpx
 import pytest
 
+CA = os.environ.get("MAIL_CA_FILE")   # only for test installs with a private CA
+if CA:
+    import certifi
+    certifi.where = lambda: CA
+    os.environ["SSL_CERT_FILE"] = CA
 BASE = os.environ["BASE_URL"].rstrip("/")
 DOMAIN = os.environ["DOMAIN"]
 RUN = uuid.uuid4().hex[:6]
@@ -116,7 +121,8 @@ class Browser:
         """Two-step verification by email codes."""
         page = self.c.get("/security")
         r = self.c.post("/security/two-step/email/start", data={"csrf": self.csrf(page.text), "address": CODES})
-        assert r.status_code == 200 and "We emailed a 6-digit code" in r.text, r.text[:500]
+        assert r.status_code == 200 and "We emailed a 6-digit code" in r.text, \
+            re.findall(r'class="notice [a-z]+">([^<]+)', r.text) or r.text[:500]
         r = self.c.post("/security/two-step/email/confirm", data={"csrf": self.csrf(r.text), "code": emailed_code(email)})
         codes = re.findall(r"<code>([0-9a-f]{6}-[0-9a-f]{6})</code>", r.text)
         assert len(codes) == 10, r.text[:500]

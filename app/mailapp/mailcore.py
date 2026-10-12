@@ -30,6 +30,8 @@ class MailError(Exception):
 def _ssl() -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    if config.MAIL_CA_FILE:
+        ctx.load_verify_locations(config.MAIL_CA_FILE)
     return ctx
 
 

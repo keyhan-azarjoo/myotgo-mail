@@ -1,0 +1,29 @@
+# Installs everything from zero on a fresh Ubuntu machine with install.sh (test certificate mode,
+# since there is no public domain here), then runs both end-to-end test suites against it.
+name: install test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install from this checkout
+        run: |
+          ip=$(hostname -I | awk '{print $1}')
+          sudo env DOMAIN=example.test MAIL_HOST=mx.example.test ADMIN_EMAIL=admin@example.test \
+            ACME_EMAIL=ops@example.org SERVER_IP="$ip" CERT_METHOD=selfsigned APP_BUILD=1 \
+            MAILSERVER_SRC="$PWD" bash install.sh --yes
+      - name: Mail server test
+        run: sudo mailctl test admin@example.test
+      - name: Console, API, MCP and OAuth tests
+        run: sudo mailctl test-app
+      - name: Logs on failure
+        if: failure()
+        run: |
+          sudo docker logs mailapp --tail 200 || true
+          sudo docker logs mailserver --tail 200 || true

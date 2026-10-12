@@ -1,5 +1,8 @@
 # Self-hosted business email in one command
 
+[![install test](https://github.com/keyhan-azarjoo/myotgo-mail/actions/workflows/install-test.yml/badge.svg)](https://github.com/keyhan-azarjoo/myotgo-mail/actions/workflows/install-test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Run your own email server for your domain (`you@yourcompany.com`) on a small rented server,
 with **as many mailboxes as you like and no per-user fees**. You keep using Outlook, Apple Mail,
 Thunderbird or your phone's mail app, exactly as with Google Workspace, Microsoft 365 or Zoho.
@@ -7,13 +10,14 @@ Thunderbird or your phone's mail app, exactly as with Google Workspace, Microsof
 It also comes with a **web console, a REST API and an MCP server**, so people and AI assistants
 such as Claude can read, search, send and organize mail, each with exactly the access an admin gives them.
 
+On a fresh Ubuntu or Debian server, as root:
+
 ```bash
-./mail init           # create your settings file
-./mail server-setup   # prepare a fresh server
-./mail deploy         # install the mail server
-./mail add you@yourcompany.com
-./mail test you@yourcompany.com
+curl -fsSL https://raw.githubusercontent.com/keyhan-azarjoo/myotgo-mail/main/install.sh | sudo bash
 ```
+
+It asks for your domain and email, sets everything up, and finishes by printing the DNS records to
+add and your admin password. From then on, `mailctl` does the rest: `mailctl add anna@yourcompany.com`.
 
 It is a thin, scripted layer on top of proven open-source mail software
 ([docker-mailserver](https://github.com/docker-mailserver/docker-mailserver): Postfix, Dovecot, Rspamd),
@@ -134,9 +138,51 @@ the setup below is DNS records: the server itself is the easy part.
 Using a separate server just for mail is recommended: it keeps port 80 free for the certificate and
 keeps a problem on your web/app server away from your email.
 
-## Set it up, step by step
+## Install
 
-### 1. Download and configure
+### The quick way: one command on the server
+
+1. **Rent a small server** (1 GB RAM is enough) with Ubuntu 22.04+ or Debian 12+, and note its public IP.
+2. **Point the mail name at it.** At your domain provider, create an **A record**:
+   `mx.yourcompany.com` → the server's IP. (The installer waits for this, because the certificate needs it.)
+3. **Run the installer** on the server:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/keyhan-azarjoo/myotgo-mail/main/install.sh | sudo bash
+   ```
+
+   It asks for your domain, the mail server's name (default `mx.yourcompany.com`), your own address
+   (your first mailbox and admin login) and an email outside the server for certificate notices. Then it:
+   - installs Docker, opens the firewall (SSH, 25, 443, 465, 587, 993) and adds swap on small servers
+   - gets a free Let's Encrypt certificate and renews it every week
+   - starts the mail server and the web console/API/MCP app
+   - creates your mailbox, `no-reply@` for sign-in codes, `postmaster@` and `abuse@`, and your admin login
+   - prints every **DNS record** to add (also saved in `/opt/mailserver/DNS-RECORDS.txt`) and tells you
+     if your host blocks outgoing port 25
+
+   For an unattended install, set the answers in the environment:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/keyhan-azarjoo/myotgo-mail/main/install.sh | \
+     sudo DOMAIN=yourcompany.com ADMIN_EMAIL=you@yourcompany.com ACME_EMAIL=you@gmail.com bash -s -- --yes
+   ```
+
+4. **Add the DNS records** it printed (SPF, DKIM, DMARC; MX last), and set **reverse DNS (PTR)** in your
+   hosting provider's panel. Check with `mailctl dns check`.
+5. **Sign in** at `https://mx.yourcompany.com` with the password it printed, choose your own (it becomes
+   your Outlook password too) and turn on two-step verification.
+6. **Test:** `mailctl test you@yourcompany.com` and `mailctl test-app`.
+7. **Go live:** point the domain's **MX** record at `mx.yourcompany.com`.
+
+Running the installer again is safe: it keeps your data and settings and just updates and restarts.
+`mailctl update` does the same later.
+
+### The other way: manage the server from your own computer
+
+If you'd rather keep the scripts and your settings on your laptop and drive the server over SSH, use
+`./mail`. It does the same work, step by step.
+
+#### 1. Download and configure
 
 ```bash
 git clone https://github.com/keyhan-azarjoo/myotgo-mail.git mailserver
@@ -158,12 +204,12 @@ CERT_METHOD=http                # or dns if port 80 on the server is in use
 
 `mail.conf` is in `.gitignore`: your details stay on your computer.
 
-### 2. Point the mail name at the server
+#### 2. Point the mail name at the server
 
 At your DNS provider, create an **A record**: `mx.yourcompany.com` → your server's IP.
 (With GoDaddy and `DNS_PROVIDER=godaddy`, `./mail dns prepare` does this later for you.)
 
-### 3. Prepare the server
+#### 3. Prepare the server
 
 ```bash
 ./mail server-setup
@@ -173,7 +219,7 @@ It installs Docker, opens the firewall for SSH and the mail ports, adds swap on 
 host name, turns SSH password login off (only if a key is installed) and tells you whether outgoing port 25
 is blocked.
 
-### 4. Install the mail server
+#### 4. Install the mail server
 
 ```bash
 ./mail deploy
@@ -182,7 +228,7 @@ is blocked.
 It copies the files, fetches the certificate, installs the weekly renewal and nightly backup, and starts
 the server. Run it again any time you change something: it is safe to repeat.
 
-### 5. Create your first mailbox
+#### 5. Create your first mailbox
 
 ```bash
 ./mail add you@yourcompany.com
@@ -191,7 +237,7 @@ the server. Run it again any time you change something: it is safe to repeat.
 The password is printed once and saved in `SECRETS_DIR`. The first mailbox also receives `postmaster@`
 and `abuse@` (change this with `DEFAULT_ALIASES`).
 
-### 6. Create the DNS records
+#### 6. Create the DNS records
 
 ```bash
 ./mail dns records
@@ -212,7 +258,7 @@ Then check:
 ./mail dns check
 ```
 
-### 7. Test it
+#### 7. Test it
 
 ```bash
 ./mail test you@yourcompany.com
@@ -223,7 +269,7 @@ The first checks certificates, wrong-password refusal, incoming mail, open relay
 aliases, IMAP and DKIM. The second also sends a real message to an outside address. Open it in Gmail
 and use **Show original**: SPF, DKIM and DMARC should all say **PASS**.
 
-### 8. Go live
+#### 8. Go live
 
 Point the domain's **MX** record at `mx.yourcompany.com` (priority 10), or with GoDaddy:
 
@@ -312,11 +358,8 @@ with three faces, all backed by **one SQLite database** and the same permission 
 
 ### First admin
 
-```bash
-./mail add no-reply@yourcompany.com      # the mailbox that sends sign-in codes
-./mail add you@yourcompany.com           # your own mailbox (if you haven't yet)
-./mail app-admin you@yourcompany.com     # your console login; prints a temporary password
-```
+The installer creates your admin login and `no-reply@` for you. To add another admin later:
+`mailctl admin anna@yourcompany.com` (or `./mail app-admin …` from your computer).
 
 Open `https://mx.yourcompany.com`, sign in, choose your own password, then turn on two-step verification
 (an authenticator app, or codes emailed to an address outside this server). Only admins create accounts;
@@ -448,6 +491,9 @@ root-owned account files; backups in `/var/backups/mailserver` aren't encrypted 
 ./mail app-test-scenarios   # 100 realistic requests to Claude through MCP, each checked on the server
 ```
 
+On every change to this repository, GitHub installs everything from zero on a fresh Ubuntu machine with
+`install.sh` and runs both suites (see the *install test* badge at the top).
+
 All of them create their own throwaway admin, mailboxes and users and remove them afterwards
 (`./mail app-test-cleanup` removes leftovers if a run is interrupted). The scenarios include drafting and
 **sending only after confirmation**, cancelling, editing a draft, answering questions from received mail,
@@ -456,6 +502,26 @@ replying, forwarding, organizing, reading attachments, and a read-only user bein
 ![A real test conversation](docs/images/claude-conversation.png)
 
 ## Everyday commands
+
+On the server, `mailctl` (installed by the installer):
+
+```text
+mailctl add anna@yourcompany.com       new mailbox (prints the password once; saved in /root/.mail-secrets)
+mailctl passwd anna@yourcompany.com    new password
+mailctl alias sales@yourcompany.com anna@yourcompany.com     /   mailctl unalias ...
+mailctl del anna@yourcompany.com       delete a mailbox and its mail
+mailctl list                           mailboxes and aliases
+mailctl outlook anna@yourcompany.com   settings for a mail app
+mailctl admin anna@yourcompany.com     a console admin login
+mailctl dns records | check            DNS records to add / check them
+mailctl status | logs | queue [flush] | backup | restart
+mailctl unblock 198.51.100.7           clear sign-in limits and bans for an address
+mailctl update                         latest version, applied
+mailctl test you@yourcompany.com       mail server end-to-end test
+mailctl test-app                       console, API, MCP and OAuth end-to-end test
+```
+
+From your own computer, `./mail` has the same commands (plus `deploy`, `server-setup`, `ssh`):
 
 ```text
 ./mail add anna@yourcompany.com          new mailbox (prints the password once)
@@ -523,12 +589,16 @@ backup with `tar --numeric-owner -xzf /var/backups/mailserver/mail-<date>.tar.gz
 
 | Path | What |
 |---|---|
-| `mail` | the one command |
+| `install.sh` | one-line installer (runs on the server) |
+| `mailctl` | the command on the server |
+| `mail` | the same commands from your own computer, over SSH |
 | `mail.conf.example` | settings template (copy to `mail.conf`) |
 | `compose.yaml`, `mailserver.env` | the mail server container and its options |
 | `config/` | fail2ban and Postfix settings copied to the server on deploy |
 | `scripts/server-setup.sh` | prepares a fresh server |
-| `scripts/deploy.sh` | installs/updates on the server |
+| `scripts/apply.sh` | applies the settings and (re)starts everything; used by all of the above |
+| `scripts/deploy.sh` | copies this folder to the server and runs apply (for `./mail`) |
+| `.github/workflows/` | publishes the app image; installs from zero and runs the tests on every change |
 | `scripts/cert.sh`, `scripts/backup.sh` | run on the server by cron |
 | `scripts/account.sh`, `scripts/dns.py` | mailboxes and DNS |
 | `tests/check.py` | end-to-end test of the mail server |
