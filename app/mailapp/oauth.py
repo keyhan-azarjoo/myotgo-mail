@@ -81,7 +81,8 @@ class Provider:
             if not row or row["used"] or row["expires_at"] < time.time():
                 raise TokenError(error="invalid_grant", error_description="The code is invalid or expired.")
             conn.execute("UPDATE oauth_codes SET used = 1 WHERE code_hash = ?", (h,))
-        return self._issue(client.client_id, row["user_id"], json.loads(row["scopes"]), family=h, mfa=bool(row["mfa"]))
+        return self._issue(client.client_id, row["user_id"], json.loads(row["scopes"]), family=h, mfa=bool(row["mfa"]),
+                           direct_send=bool(row["direct_send"]))
 
     # ---- refresh ----
     async def load_refresh_token(self, client, refresh_token: str) -> RefreshToken | None:
@@ -109,7 +110,8 @@ class Provider:
             conn.execute("UPDATE oauth_tokens SET revoked = 1 WHERE token_hash = ?", (h,))  # rotation
         granted = json.loads(row["scopes"])
         scopes = [s for s in (scopes or granted) if s in granted]
-        return self._issue(client.client_id, row["user_id"], scopes, family=row["family"], mfa=bool(row["mfa"]))
+        return self._issue(client.client_id, row["user_id"], scopes, family=row["family"], mfa=bool(row["mfa"]),
+                           direct_send=bool(row["direct_send"]))
 
     # ---- access tokens: OAuth ones and personal API tokens ----
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -119,12 +121,16 @@ class Provider:
                 return None
             return AccessToken(token=token, client_id=f"pat:{row['id']}", scopes=json.loads(row["scopes"]),
                                expires_at=int(row["expires_at"]) if row["expires_at"] else None,
-                               resource=config.MCP_URL, subject=str(row["user_id"]))
+                               resource=config.MCP_URL, subject=str(row["user_id"]),
+                               claims={"direct_send": bool(row["direct_send"]), "app": f"token “{row['name']}”"})
         row = self._token_row(token, "access")
         if not row or not auth.two_step_ok_for_tokens(row["user_id"], bool(row["mfa"])):
             return None
+        client = db.one("SELECT info FROM oauth_clients WHERE client_id = ?", (row["client_id"],))
+        name = json.loads(client["info"]).get("client_name") if client else None
         return AccessToken(token=token, client_id=row["client_id"], scopes=json.loads(row["scopes"]),
-                           expires_at=int(row["expires_at"]), resource=config.MCP_URL, subject=str(row["user_id"]))
+                           expires_at=int(row["expires_at"]), resource=config.MCP_URL, subject=str(row["user_id"]),
+                           claims={"direct_send": bool(row["direct_send"]), "app": name or "an app"})
 
     async def revoke_token(self, token) -> None:
         raw = getattr(token, "token", token)
@@ -143,16 +149,17 @@ class Provider:
             return None
         return row
 
-    def _issue(self, client_id: str, user_id: int, scopes: list[str], family: str, mfa: bool) -> OAuthToken:
+    def _issue(self, client_id: str, user_id: int, scopes: list[str], family: str, mfa: bool,
+               direct_send: bool = False) -> OAuthToken:
         access, refresh = security.new_token(), security.new_token()
         now = time.time()
         with db.tx() as conn:
             for tok, kind, ttl in ((access, "access", config.ACCESS_TOKEN_SECONDS),
                                    (refresh, "refresh", config.REFRESH_TOKEN_DAYS * 86400)):
                 conn.execute("INSERT INTO oauth_tokens(token_hash, kind, family, client_id, user_id, scopes, "
-                             "expires_at, created_at, mfa) VALUES(?,?,?,?,?,?,?,?,?)",
+                             "expires_at, created_at, mfa, direct_send) VALUES(?,?,?,?,?,?,?,?,?,?)",
                              (security.token_hash(tok), kind, family, client_id, user_id, json.dumps(scopes),
-                              now + ttl, now, int(mfa)))
+                              now + ttl, now, int(mfa), int(direct_send)))
         return OAuthToken(access_token=access, expires_in=config.ACCESS_TOKEN_SECONDS, scope=" ".join(scopes),
                           refresh_token=refresh)
 
@@ -186,7 +193,7 @@ def pending_request(rid: str):
     return row, OAuthClientInformationFull.model_validate_json(client["info"]), AuthorizationParams.model_validate_json(row["params"])
 
 
-def approve(rid: str, user_id: int, mfa: bool = False, allow_admin: bool = False) -> str:
+def approve(rid: str, user_id: int, mfa: bool = False, allow_admin: bool = False, direct_send: bool = False) -> str:
     """Create the authorization code for a pending request and return the client redirect URL."""
     from mcp.server.auth.provider import construct_redirect_uri
     row, client, params = pending_request(rid)
@@ -198,11 +205,12 @@ def approve(rid: str, user_id: int, mfa: bool = False, allow_admin: bool = False
     with db.tx() as conn:
         conn.execute("DELETE FROM oauth_requests WHERE id = ?", (rid,))
         conn.execute("INSERT INTO oauth_codes(code_hash, client_id, user_id, scopes, code_challenge, redirect_uri, "
-                     "redirect_explicit, expires_at, mfa) VALUES(?,?,?,?,?,?,?,?,?)",
+                     "redirect_explicit, expires_at, mfa, direct_send) VALUES(?,?,?,?,?,?,?,?,?,?)",
                      (security.token_hash(code), client.client_id, user_id, json.dumps(scopes), params.code_challenge,
                       str(params.redirect_uri), int(params.redirect_uri_provided_explicitly), time.time() + CODE_SECONDS,
-                      int(mfa)))
-    db.audit(None, "oauth.approved", client.client_name or client.client_id, {"user_id": user_id, "scopes": scopes})
+                      int(mfa), int(direct_send)))
+    db.audit(None, "oauth.approved", client.client_name or client.client_id,
+             {"user_id": user_id, "scopes": scopes, "direct_send": direct_send})
     return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state)
 
 

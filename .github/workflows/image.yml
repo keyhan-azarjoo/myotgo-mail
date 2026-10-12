@@ -4,7 +4,6 @@ name: app image
 on:
   push:
     branches: [main]
-    paths: ["app/**", ".github/workflows/image.yml"]
   workflow_dispatch:
 permissions:
   contents: read

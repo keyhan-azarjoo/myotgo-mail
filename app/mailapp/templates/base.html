@@ -13,6 +13,7 @@
   <a class="brand" href="/"><span class="logo">✉</span> {{ app_name }}</a>
   <nav>
     <a href="/" class="{{ 'on' if request.url.path == '/' }}">Mailboxes</a>
+    <a href="/approvals" class="{{ 'on' if request.url.path.startswith('/approvals') }}">Approvals{% if pending_approvals %} <span class="badge">{{ pending_approvals }}</span>{% endif %}</a>
     {% if sess.role == 'admin' %}
     <a href="/admin/users" class="{{ 'on' if request.url.path.startswith('/admin/users') }}">Users</a>
     <a href="/admin/mailboxes" class="{{ 'on' if request.url.path.startswith('/admin/mailboxes') }}">Mail setup</a>

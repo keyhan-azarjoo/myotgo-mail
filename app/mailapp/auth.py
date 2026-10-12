@@ -292,7 +292,7 @@ def two_step_ok_for_tokens(user_id: int, issued_with_mfa: bool) -> bool:
 
 
 def create_api_token(user_id: int, name: str, scopes: list[str], days: int | None,
-                     mfa: bool = False) -> tuple[str, dict]:
+                     mfa: bool = False, direct_send: bool = False) -> tuple[str, dict]:
     user = db.one("SELECT role, email FROM users WHERE id = ?", (user_id,))
     scopes = [s for s in service.SCOPES if s in set(scopes)]
     if user["role"] != "admin":
@@ -302,17 +302,17 @@ def create_api_token(user_id: int, name: str, scopes: list[str], days: int | Non
     name = (name or "").strip()[:60] or "token"
     token = security.new_token(PAT_PREFIX)
     expires = time.time() + days * 86400 if days else None
-    tid = db.execute("INSERT INTO api_tokens(user_id, name, token_hash, prefix, scopes, created_at, expires_at, mfa) "
-                     "VALUES(?,?,?,?,?,?,?,?)",
+    tid = db.execute("INSERT INTO api_tokens(user_id, name, token_hash, prefix, scopes, created_at, expires_at, mfa, "
+                     "direct_send) VALUES(?,?,?,?,?,?,?,?,?)",
                      (user_id, name, security.token_hash(token), token[:12], json.dumps(scopes), time.time(), expires,
-                      int(mfa)))
-    db.audit(user["email"], "token.create", name, {"scopes": scopes, "days": days})
-    return token, {"id": tid, "name": name, "scopes": scopes, "expires_at": expires}
+                      int(mfa), int(direct_send)))
+    db.audit(user["email"], "token.create", name, {"scopes": scopes, "days": days, "direct_send": direct_send})
+    return token, {"id": tid, "name": name, "scopes": scopes, "expires_at": expires, "direct_send": direct_send}
 
 
 def list_api_tokens(user_id: int) -> list[dict]:
     return [{**dict(r), "scopes": json.loads(r["scopes"])} for r in db.query(
-        "SELECT id, name, prefix, scopes, created_at, expires_at, last_used_at, revoked FROM api_tokens "
+        "SELECT id, name, prefix, scopes, created_at, expires_at, last_used_at, revoked, direct_send FROM api_tokens "
         "WHERE user_id = ? ORDER BY revoked, id DESC", (user_id,))]
 
 

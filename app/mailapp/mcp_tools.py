@@ -48,8 +48,10 @@ def _principal() -> service.Principal:
         raise ToolError("Not signed in.")
     if security.rate_limited(f"mcp:{security.token_hash(token.token)[:16]}", 300, 60):
         raise ToolError("Too many requests. Slow down and try again in a minute.")
+    claims = token.claims or {}
     try:
-        return service.principal_for(int(token.subject), token.scopes, via="mcp")
+        return service.principal_for(int(token.subject), token.scopes, via="mcp",
+                                     direct_send=bool(claims.get("direct_send")), requested_by=claims.get("app", "an AI assistant"))
     except service.Forbidden as e:
         raise ToolError(str(e)) from None
 
@@ -73,7 +75,8 @@ def register(mcp) -> None:
     async def whoami() -> dict[str, Any]:
         """Who you are signed in as, your role and the permissions of this connection."""
         p = _principal()
-        return {"email": p.email, "role": p.role, "scopes": sorted(p.scopes)}
+        return {"email": p.email, "role": p.role, "scopes": sorted(p.scopes),
+                "sending_needs_approval": not p.direct_send}
 
     @mcp.tool(annotations=READ)
     async def list_mailboxes() -> list[dict]:
@@ -133,21 +136,21 @@ def register(mcp) -> None:
                              description="Send as one of the mailbox's aliases instead")] = None,
                          from_name: Annotated[str | None, Field(description="Display name, e.g. 'Support team'")] = None,
                          ) -> dict[str, Any]:
-        """Send an email from a mailbox. A copy is saved in its Sent folder. Only call this after the person has seen the full draft and confirmed it."""
+        """Send an email from a mailbox. A copy is saved in its Sent folder. Only call this after the person has seen the full draft and confirmed it. Unless this connection may send directly, the message then waits for the owner to approve it in the web console: tell them so."""
         return await _run(service.send, mailbox, to=to, subject=subject, text=text, html=html, cc=cc or [],
                           bcc=bcc or [], attachments=attachments or [], from_address=from_address, from_name=from_name)
 
     @mcp.tool(annotations=WRITE)
     async def reply_email(mailbox: Mailbox, uid: Uid, text: str, folder: Folder = "INBOX",
                           reply_all: bool = False, attachments: Attachments = None) -> dict[str, Any]:
-        """Reply to a message (quotes it, keeps the conversation threaded, marks it answered). Only call this after the person has seen the full draft and confirmed it."""
+        """Reply to a message (quotes it, keeps the conversation threaded, marks it answered). Only call this after the person has seen the full draft and confirmed it. Unless this connection may send directly, the message then waits for the owner to approve it in the web console: tell them so."""
         return await _run(service.reply, mailbox, folder, uid, text=text, reply_all=reply_all,
                           attachments=attachments or [])
 
     @mcp.tool(annotations=WRITE)
     async def forward_email(mailbox: Mailbox, uid: Uid, to: Addresses, text: str = "",
                             folder: Folder = "INBOX", cc: Addresses | None = None) -> dict[str, Any]:
-        """Forward a message, attached in full, with an optional note. Only call this after the person has seen the full draft and confirmed it."""
+        """Forward a message, attached in full, with an optional note. Only call this after the person has seen the full draft and confirmed it. Unless this connection may send directly, the message then waits for the owner to approve it in the web console: tell them so."""
         return await _run(service.forward, mailbox, folder, uid, to=to, text=text, cc=cc or [])
 
     @mcp.tool(annotations=WRITE)
@@ -156,6 +159,17 @@ def register(mcp) -> None:
         """Save a message in Drafts without sending it, so a person can review and send it."""
         return await _run(service.save_draft, mailbox, to=to or [], subject=subject, text=text, cc=cc or [],
                           attachments=attachments or [])
+
+    @mcp.tool(annotations=READ)
+    async def list_pending_approvals() -> list[dict]:
+        """Messages you prepared that are waiting for the owner's approval in the web console."""
+        return await _run(service.list_approvals)
+
+    @mcp.tool(annotations=READ)
+    async def approval_status(approval_id: int) -> dict[str, Any]:
+        """Status of a message waiting for approval: waiting, sent, rejected or expired."""
+        d = await _run(service.approval_detail, approval_id)
+        return {k: d[k] for k in ("id", "status", "kind", "mailbox", "to", "subject", "result")}
 
     # ----- organizing -----
     @mcp.tool(annotations=WRITE)

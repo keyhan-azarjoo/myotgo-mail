@@ -24,8 +24,10 @@ async def principal(request: Request) -> service.Principal:
         raise HTTPException(401, "The token is invalid, expired or revoked.", headers={"WWW-Authenticate": "Bearer"})
     if security.rate_limited(f"api:{security.token_hash(token.token)[:16]}", 600, 60):
         raise HTTPException(429, "Too many requests. Slow down.")
+    claims = token.claims or {}
     try:
-        return service.principal_for(int(token.subject), token.scopes, via="api", ip=request.client.host)
+        return service.principal_for(int(token.subject), token.scopes, via="api", ip=request.client.host,
+                                     direct_send=bool(claims.get("direct_send")), requested_by=claims.get("app", "a token"))
     except service.Forbidden as e:
         raise HTTPException(403, str(e)) from None
 
@@ -141,7 +143,8 @@ def _atts(items):
 # ---------- me ----------
 @router.get("/me")
 async def me(p=P):
-    return {"email": p.email, "role": p.role, "scopes": sorted(p.scopes)}
+    return {"email": p.email, "role": p.role, "scopes": sorted(p.scopes),
+            "sending_needs_approval": not p.direct_send}
 
 
 @router.get("/mailboxes")
@@ -193,22 +196,39 @@ async def attachment(mailbox: str, uid: int, index: int, p=P, folder: str = "INB
                     headers={"Content-Disposition": f'attachment; filename="{safe}"', "X-Original-Content-Type": ctype[:100]})
 
 
+def _sent_or_waiting(result):
+    """200 when sent; 202 Accepted when it waits for the owner's approval."""
+    return JSONResponse(result, status_code=202 if result.get("status") == "waiting_for_approval" else 200)
+
+
 @router.post("/mailboxes/{mailbox}/send")
 async def send(mailbox: str, body: SendBody, p=P):
-    return await call(service.send, p, mailbox, to=body.to, subject=body.subject, text=body.text, html=body.html,
-                      cc=body.cc, bcc=body.bcc, attachments=_atts(body.attachments), from_address=body.from_address,
-                      from_name=body.from_name)
+    return _sent_or_waiting(await call(service.send, p, mailbox, to=body.to, subject=body.subject, text=body.text,
+                                       html=body.html, cc=body.cc, bcc=body.bcc, attachments=_atts(body.attachments),
+                                       from_address=body.from_address, from_name=body.from_name))
 
 
 @router.post("/mailboxes/{mailbox}/messages/{uid}/reply")
 async def reply(mailbox: str, uid: int, body: ReplyBody, p=P, folder: str = "INBOX"):
-    return await call(service.reply, p, mailbox, folder, uid, text=body.text, reply_all=body.reply_all,
-                      attachments=_atts(body.attachments))
+    return _sent_or_waiting(await call(service.reply, p, mailbox, folder, uid, text=body.text,
+                                       reply_all=body.reply_all, attachments=_atts(body.attachments)))
 
 
 @router.post("/mailboxes/{mailbox}/messages/{uid}/forward")
 async def forward(mailbox: str, uid: int, body: ForwardBody, p=P, folder: str = "INBOX"):
-    return await call(service.forward, p, mailbox, folder, uid, to=body.to, text=body.text, cc=body.cc)
+    return _sent_or_waiting(await call(service.forward, p, mailbox, folder, uid, to=body.to, text=body.text,
+                                       cc=body.cc))
+
+
+@router.get("/approvals")
+async def approvals(p=P, all: bool = False):
+    """Messages waiting for your approval. Approving is only possible in the web console."""
+    return await call(service.list_approvals, p, all)
+
+
+@router.get("/approvals/{approval_id}")
+async def approval(approval_id: int, p=P):
+    return await call(service.approval_detail, p, approval_id)
 
 
 @router.post("/mailboxes/{mailbox}/drafts", status_code=201)

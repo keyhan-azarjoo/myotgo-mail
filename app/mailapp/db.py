@@ -115,6 +115,23 @@ CREATE TABLE IF NOT EXISTS email_codes (
   attempts INTEGER NOT NULL DEFAULT 0,
   used INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mailbox TEXT NOT NULL,
+  kind TEXT NOT NULL,             -- send, reply, forward
+  subject TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL,          -- the exact message, encrypted: what is approved is what is sent
+  recipients TEXT NOT NULL,       -- json list (includes Bcc)
+  after TEXT NOT NULL DEFAULT '{}',
+  requested_by TEXT NOT NULL,     -- the app or token that asked
+  created_at REAL NOT NULL,
+  expires_at REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending, sent, rejected, expired, failed
+  decided_at REAL,
+  result TEXT
+);
+CREATE INDEX IF NOT EXISTS outbox_user ON outbox(user_id, status);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -191,6 +208,8 @@ def init() -> None:
             cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
             if "mfa" not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0")
+            if "direct_send" not in cols:   # 1 = may send without the owner approving each message
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN direct_send INTEGER NOT NULL DEFAULT 0")
     finally:
         conn.close()
     config.DB_PATH.chmod(0o600)

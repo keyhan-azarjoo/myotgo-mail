@@ -55,3 +55,6 @@ details summary{cursor:pointer;color:var(--brand)}details[open]{display:grid;gap
 .resend{margin-top:.8rem}
 .warnbox{background:var(--warnbg);border:1px solid #fde047;border-radius:8px;padding:.6rem .8rem;font-weight:500;align-items:flex-start}
 input[type=checkbox]{flex:none;margin-top:.2rem}
+.badge{display:inline-block;min-width:1.3rem;padding:0 .35rem;border-radius:99px;background:#dc2626;color:#fff;font-size:.75rem;font-weight:700;text-align:center}
+.mailbody{background:#f8fafc;color:var(--ink);border:1px solid var(--line);max-height:420px}
+.approval .head h2{margin:0}

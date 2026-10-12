@@ -27,6 +27,7 @@ OK_MESSAGES = {
     "alias": "Alias saved.", "linked": "Mailbox linked.", "two_step_off": "Two-step verification is off.",
     "settings": "Settings saved.", "grants": "Permissions saved.",
     "code_sent": "We emailed you a code. It works once and expires in 10 minutes.",
+    "approved": "Approved: the message was sent.", "rejected": "Rejected: nothing was sent.",
 }
 
 
@@ -50,6 +51,7 @@ def _safe_next(value: str | None) -> str:
 
 
 def _render(request, name, sess=None, status=200, **ctx):
+    ctx.setdefault("pending_approvals", service.pending_count(sess["user_id"]) if sess else 0)
     ctx.update(request=request, sess=sess, app_name=config.APP_NAME, domain=config.DOMAIN,
                ok=OK_MESSAGES.get(request.query_params.get("ok", "")), csrf=sess["csrf"] if sess else "")
     resp = templates.TemplateResponse(request, name, ctx, status_code=status)
@@ -353,7 +355,7 @@ def _scopes_for(sess):
 @router.post("/tokens", response_class=HTMLResponse)
 @guarded
 def token_create(request: Request, name: str = Form(""), days: int = Form(90), code: str = Form(""),
-                       csrf: str = Form("")):
+                 direct_send: str = Form(""), csrf: str = Form("")):
     sess = _session(request)
     _csrf(sess, csrf)
     form = request.state.form
@@ -364,7 +366,7 @@ def token_create(request: Request, name: str = Form(""), days: int = Form(90), c
         return _render(request, "tokens.html", sess, 400, error="Enter a current two-step code to create a token.", **ctx)
     try:
         token, info = auth.create_api_token(sess["user_id"], name, scopes, days if days in (7, 30, 90, 365) else 90,
-                                            mfa=bool(sess["totp_enabled"]))
+                                            mfa=bool(sess["totp_enabled"]), direct_send=bool(direct_send))
     except auth.AuthError as e:
         return _render(request, "tokens.html", sess, 400, error=str(e), **ctx)
     ctx["tokens"] = auth.list_api_tokens(sess["user_id"])
@@ -387,6 +389,27 @@ def app_revoke(request: Request, grant_id: str, csrf: str = Form("")):
     _csrf(sess, csrf)
     auth.revoke_oauth_grant(sess["user_id"], grant_id)
     return _redirect("/tokens?ok=revoked")
+
+
+@router.get("/approvals", response_class=HTMLResponse)
+@guarded
+def approvals_page(request: Request):
+    sess = _session(request)
+    p = _p(request, sess)
+    pending = [service.approval_detail(p, a["id"]) for a in service.list_approvals(p)]
+    done = [a for a in service.list_approvals(p, include_done=True) if a["status"] != "pending"][:20]
+    return _render(request, "approvals.html", sess, pending=pending, done=done, fmt=_fmt)
+
+
+@router.post("/approvals/{approval_id}")
+@guarded
+def approval_decide(request: Request, approval_id: int, decision: str = Form(""), csrf: str = Form("")):
+    sess = _session(request)
+    _csrf(sess, csrf)
+    if decision not in ("approve", "reject"):
+        raise service.Invalid("Choose approve or reject.")
+    service.decide_approval(_p(request, sess), approval_id, decision == "approve")
+    return _redirect("/approvals?ok=" + ("approved" if decision == "approve" else "rejected"))
 
 
 @router.get("/connect", response_class=HTMLResponse)
@@ -647,7 +670,7 @@ def _consent(request, sess, rid, client, params, status=200, error=None):
 @router.post("/oauth/consent")
 @guarded
 def consent(request: Request, request_id: str = Form(""), decision: str = Form(""), code: str = Form(""),
-            allow_admin: str = Form(""), csrf: str = Form("")):
+            allow_admin: str = Form(""), direct_send: str = Form(""), csrf: str = Form("")):
     sess = _session(request)
     _csrf(sess, csrf)
     if decision != "approve":
@@ -661,7 +684,7 @@ def consent(request: Request, request_id: str = Form(""), decision: str = Form("
     if sess["totp_enabled"] and not auth.check_second_step(sess["user_id"], code, _ip(request)):
         return _consent(request, sess, request_id, client, params, 401, "That two-step code isn't right.")
     return _redirect(oauth.approve(request_id, sess["user_id"], mfa=bool(sess["totp_enabled"]),
-                                   allow_admin=bool(allow_admin)))
+                                   allow_admin=bool(allow_admin), direct_send=bool(direct_send)))
 
 
 __all__ = ["router", "json"]

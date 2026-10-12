@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Approvals · {{ app_name }}{% endblock %}
+{% block content %}
+<h1>Approvals</h1>
+<p class="muted">Emails prepared by AI assistants and tokens wait here. Nothing is sent until you approve it,
+and what you see is exactly what will be sent.</p>
+
+{% for m in pending %}
+<section class="box approval">
+  <div class="head">
+    <h2>{{ m.subject or "(no subject)" }}</h2>
+    <span class="pill warn">{{ m.kind }} · waiting</span>
+  </div>
+  <table class="kv">
+    <tr><th>Requested by</th><td>{{ m.requested_by }} · {{ fmt(m.created_at) }}</td></tr>
+    <tr><th>From</th><td>{{ m.from }}</td></tr>
+    <tr><th>To</th><td>{{ m.to or "—" }}</td></tr>
+    {% if m.cc %}<tr><th>Cc</th><td>{{ m.cc }}</td></tr>{% endif %}
+    {% if m.bcc %}<tr><th>Bcc</th><td><strong>{{ m.bcc }}</strong></td></tr>{% endif %}
+    {% if m.attachments %}<tr><th>Attachments</th><td>{% for a in m.attachments %}{{ a.filename }} ({{ (a.size / 1024)|round(1) }} KB){% if not loop.last %}, {% endif %}{% endfor %}</td></tr>{% endif %}
+  </table>
+  <pre class="mailbody">{{ m.text }}</pre>
+  <div class="row">
+    <form method="post" action="/approvals/{{ m.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="primary" name="decision" value="approve">Approve and send</button></form>
+    <form method="post" action="/approvals/{{ m.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" name="decision" value="reject">Reject</button></form>
+  </div>
+</section>
+{% else %}
+<div class="empty box">Nothing is waiting for your approval.</div>
+{% endfor %}
+
+{% if done %}
+<h2>Recent decisions</h2>
+<table>
+  <thead><tr><th>Subject</th><th>To</th><th>Requested by</th><th>Status</th><th>When</th></tr></thead>
+  <tbody>
+  {% for d in done %}
+  <tr><td>{{ d.subject or "(no subject)" }}</td><td class="small">{{ d.recipients|join(", ") }}</td>
+    <td class="small">{{ d.requested_by }}</td>
+    <td><span class="pill {{ 'ok' if d.status == 'sent' else 'warn' }}">{{ d.status }}</span></td>
+    <td class="muted small">{{ fmt(d.decided_at) }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

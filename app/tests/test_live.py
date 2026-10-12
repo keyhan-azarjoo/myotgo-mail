@@ -59,17 +59,20 @@ def emailed_code(address, timeout=60):
     host = urlsplit(BASE).hostname
     deadline = time.time() + timeout
     while time.time() < deadline:
-        with imaplib.IMAP4_SSL(host, 993, ssl_context=ssl.create_default_context()) as im:
-            im.login(CODES, os.environ["CODES_PASSWORD"])
-            im.select("INBOX")
-            _, data = im.search(None, "SUBJECT", '"Your sign-in code"', "BODY", f'"for {address}"')
-            for num in reversed(data[0].split()):
-                _, hdr = im.fetch(num, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
-                m = re.search(rb"Your sign-in code: (\d{6})", hdr[0][1])
-                if m and (address, m.group(1).decode()) not in S["seen_codes"]:
-                    S["seen_codes"].add((address, m.group(1).decode()))
-                    return m.group(1).decode()
-                break   # only the newest code is valid
+        try:
+            with imaplib.IMAP4_SSL(host, 993, ssl_context=ssl.create_default_context()) as im:
+                im.login(CODES, os.environ["CODES_PASSWORD"])
+                im.select("INBOX")
+                _, data = im.search(None, "SUBJECT", '"Your sign-in code"', "BODY", f'"for {address}"')
+                for num in reversed(data[0].split()):
+                    _, hdr = im.fetch(num, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+                    m = re.search(rb"Your sign-in code: (\d{6})", hdr[0][1])
+                    if m and (address, m.group(1).decode()) not in S["seen_codes"]:
+                        S["seen_codes"].add((address, m.group(1).decode()))
+                        return m.group(1).decode()
+                    break   # only the newest code is valid
+        except (imaplib.IMAP4.abort, ssl.SSLError, OSError):
+            pass   # a dropped connection under load: try again
         time.sleep(2)
     raise AssertionError(f"no sign-in code arrived for {address}")
 
@@ -128,8 +131,10 @@ class Browser:
         assert len(codes) == 10, r.text[:500]
         return email, codes
 
-    def create_token(self, name, scopes, email=None, days=30):
+    def create_token(self, name, scopes, email=None, days=30, direct_send=False):
         data = {"name": name, "days": str(days), "scopes": scopes}
+        if direct_send:
+            data["direct_send"] = "1"
         if email:
             data["code"] = self.fresh_code(email, "/tokens")
         page = self.c.get("/tokens")
@@ -258,7 +263,8 @@ def test_03_admin_two_step_and_token():
     assert b.c.post("/admin/settings", data={"csrf": b.csrf(page.text), "allow_local": "1"}).status_code == 303
     r = b.post_form("/tokens", "/tokens", {"name": "x", "days": "30", "scopes": ["mail.read"], "code": "000000"})
     assert r.status_code == 400                                    # token needs a valid two-step code
-    S["admin_token"] = b.create_token("e2e admin", ["mail.read", "mail.send", "mail.organize", "admin"], ADMIN)
+    S["admin_token"] = b.create_token("e2e admin", ["mail.read", "mail.send", "mail.organize", "admin"], ADMIN,
+                                      direct_send=True)
     me = ok(api(S["admin_token"], "GET", "/me"))
     assert me["role"] == "admin" and "admin" in me["scopes"]
 
@@ -303,7 +309,7 @@ def test_06_user_signs_in_and_gets_token():
     with imaplib.IMAP4_SSL(urlsplit(BASE).hostname, 993) as im:
         im.login(S["U"], S["U_pw"])
     S["user"] = b
-    S["user_token"] = b.create_token("e2e user", ["mail.read", "mail.send", "mail.organize", "admin"])
+    S["user_token"] = b.create_token("e2e user", ["mail.read", "mail.send", "mail.organize", "admin"], direct_send=True)
     me = ok(api(S["user_token"], "GET", "/me"))
     assert me["role"] == "user" and "admin" not in me["scopes"]      # admin scope dropped for users
     boxes = {m["address"]: m["permissions"] for m in ok(api(S["user_token"], "GET", "/mailboxes"))}
@@ -639,6 +645,7 @@ def test_18_oauth_full_flow_with_pkce_and_two_step():
     assert set(tok["scope"].split()) == {"mail.read", "mail.send", "admin"}
     who = mcp_call(tok["access_token"], [("whoami", {}), ("list_mailboxes", {})])
     assert who[0][1]["email"] == ADMIN and "mail.organize" not in who[0][1]["scopes"]
+    assert who[0][1]["sending_needs_approval"] is True        # the default for apps signing in
     assert any(b["address"] == S["A"] for b in who[1][1])
     assert ok(api(tok["access_token"], "GET", "/me"))["role"] == "admin"
     # the code was already used: using it again fails AND cancels the tokens it produced (it leaked)
@@ -852,6 +859,55 @@ def test_25_hardening():
             im.login(victim, pw2)
     ok(api(t, "DELETE", f"/admin/users/{vid}"))
     ok(api(t, "DELETE", f"/admin/mailboxes/{victim}", params={"confirm": victim}))
+
+
+def test_26_sending_needs_the_owners_approval():
+    """Tokens and AI apps that may not send directly queue the exact message; only the owner, signed in
+    to the console, can release it."""
+    u, A, B = S["user"], S["A"], S["B"]
+    ai = u.create_token("ai assistant", ["mail.read", "mail.send", "mail.organize"], S["U"])
+    me = ok(api(ai, "GET", "/me"))
+    assert me["sending_needs_approval"] is True
+    subj = f"e2e {RUN} needs approval"
+    r = api(ai, "POST", f"/mailboxes/{B}/send", json={"to": [A], "bcc": [addr("user")], "subject": subj,
+                                                       "text": "secret plan"})
+    assert r.status_code == 202 and r.json()["status"] == "waiting_for_approval", r.text
+    aid = r.json()["approval_id"]
+    time.sleep(6)
+    assert not ok(api(S["admin_token"], "GET", f"/mailboxes/{A}/messages", params={"subject": subj}))["messages"]
+    assert any(x["id"] == aid for x in ok(api(ai, "GET", "/approvals")))
+    assert api(S["admin_token"], "GET", f"/approvals/{aid}").status_code == 404     # not someone else's
+    # a token can't approve: approving only exists in the console, behind a signed-in session
+    assert httpx.post(f"{BASE}/approvals/{aid}", data={"decision": "approve"},
+                      headers={"Authorization": f"Bearer {ai}"}, follow_redirects=False).status_code in (303, 403)
+    # the same through MCP
+    res = mcp_call(ai, [("send_email", {"mailbox": B, "to": [A], "subject": subj + " mcp", "text": "x"}),
+                        ("list_pending_approvals", {})])
+    assert res[0][1]["status"] == "waiting_for_approval", res[0]
+    mcp_aid = res[0][1]["approval_id"]
+    assert {x["id"] for x in res[1][1]} >= {aid, mcp_aid}
+    # the owner sees exactly what will be sent (Bcc included) and decides
+    page = u.get("/approvals")
+    assert subj in page.text and "secret plan" in page.text and addr("user") in page.text
+    assert 'class="badge"' in page.text
+    r = u.c.post(f"/approvals/{aid}", data={"csrf": u.csrf(page.text), "decision": "approve"})
+    assert r.status_code == 303 and r.headers["location"] == "/approvals?ok=approved"
+    assert wait_for(S["admin_token"], A, subj)
+    r = u.c.post(f"/approvals/{aid}", data={"csrf": u.csrf(page.text), "decision": "approve"})
+    assert r.status_code == 400 and "already" in r.text                              # never twice
+    r = u.c.post(f"/approvals/{mcp_aid}", data={"csrf": u.csrf(page.text), "decision": "reject"})
+    assert r.headers["location"] == "/approvals?ok=rejected"
+    time.sleep(6)
+    assert not ok(api(S["admin_token"], "GET", f"/mailboxes/{A}/messages", params={"subject": subj + " mcp"}))["messages"]
+    assert mcp_call(ai, [("approval_status", {"approval_id": mcp_aid})])[0][1]["status"] == "rejected"
+    # a reply waits too, and is threaded once approved
+    ok(api(S["admin_token"], "POST", f"/mailboxes/{A}/send", json={"to": [B], "subject": subj + " q", "text": "q?"}))
+    q = wait_for(ai, B, subj + " q")
+    r = api(ai, "POST", f"/mailboxes/{B}/messages/{q['uid']}/reply", json={"text": "answer after approval"})
+    assert r.status_code == 202
+    page = u.get("/approvals")
+    u.c.post(f"/approvals/{r.json()['approval_id']}", data={"csrf": u.csrf(page.text), "decision": "approve"})
+    assert wait_for(S["admin_token"], A, "Re: " + subj + " q")
 
 
 # ---------- 6. cleanup -------------------------------------------------------------------------------

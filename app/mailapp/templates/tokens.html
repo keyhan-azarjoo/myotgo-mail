@@ -25,6 +25,9 @@ Claude can also connect without a token: see <a href="/connect">Connect</a>.</p>
     <fieldset><legend>Allow</legend>
       {% for s in scopes %}<label class="check"><input type="checkbox" name="scopes" value="{{ s }}" {% if s != 'admin' %}checked{% endif %}> {{ s }}</label>{% endfor %}
     </fieldset>
+    <label class="check warnbox"><input type="checkbox" name="direct_send" value="1">
+      <span>Can send email <strong>without my approval</strong>. Only for your own trusted scripts, never for an
+      AI assistant: otherwise every message it sends waits on the Approvals page for you.</span></label>
     {% if sess.totp_enabled %}<label>Two-step code<input name="code" inputmode="numeric" autocomplete="one-time-code" required>{% if sess.two_step_method == 'email' %}<p class="small"><button class="link" form="sendcode">Email me a code</button></p>{% endif %}</label>{% endif %}
     <div><button class="primary">Create token</button></div>
   </form>
@@ -37,7 +40,7 @@ Claude can also connect without a token: see <a href="/connect">Connect</a>.</p>
   <tr class="{{ 'off' if t.revoked or (t.expires_at and t.expires_at < now) }}">
     <td>{{ t.name }}</td>
     <td><code>{{ t.prefix }}…</code></td>
-    <td>{% for s in t.scopes %}<span class="pill">{{ s }}</span>{% endfor %}</td>
+    <td>{% for s in t.scopes %}<span class="pill">{{ s }}</span>{% endfor %}{% if t.direct_send %}<span class="pill warn">sends without approval</span>{% endif %}</td>
     <td class="muted">{% if t.revoked %}revoked{% elif t.expires_at %}{{ ((t.expires_at - now) / 86400)|round|int }} days{% else %}never{% endif %}</td>
     <td class="muted">{% if t.last_used_at %}{{ ((now - t.last_used_at) / 3600)|round(1) }} h ago{% else %}never{% endif %}</td>
     <td>{% if not t.revoked %}<form method="post" action="/tokens/{{ t.id }}/revoke"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link danger">Revoke</button></form>{% endif %}</td>

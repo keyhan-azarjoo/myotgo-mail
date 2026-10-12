@@ -9,6 +9,7 @@ Permissions
                          organize  flag, move, delete messages; create/rename/delete folders
   token / OAuth scopes narrow this further: mail.read, mail.send, mail.organize, admin
 """
+import json
 import time
 from dataclasses import dataclass, field
 
@@ -39,6 +40,8 @@ class Principal:
     scopes: frozenset = field(default_factory=lambda: frozenset(SCOPES))
     via: str = "web"
     ip: str | None = None
+    direct_send: bool = True       # False: sending waits for the owner's approval in the console
+    requested_by: str = ""         # the app or token acting, shown on the approval page
 
     @property
     def is_admin(self) -> bool:
@@ -49,14 +52,14 @@ class Principal:
         return f"{self.email} ({self.via})"
 
 
-def principal_for(user_id: int, scopes=SCOPES, via="web", ip=None) -> Principal:
+def principal_for(user_id: int, scopes=SCOPES, via="web", ip=None, direct_send=True, requested_by="") -> Principal:
     row = db.one("SELECT id, email, role, disabled FROM users WHERE id = ?", (user_id,))
     if not row or row["disabled"]:
         raise Forbidden("This account is disabled.")
     scopes = frozenset(s for s in scopes if s in SCOPES)
     if row["role"] != "admin":
         scopes -= {"admin"}
-    return Principal(row["id"], row["email"], row["role"], scopes, via, ip)
+    return Principal(row["id"], row["email"], row["role"], scopes, via, ip, direct_send, requested_by)
 
 
 def _audit(p: Principal, action: str, target=None, detail=None):
@@ -159,12 +162,7 @@ def send(p, mailbox, *, to, subject, text="", html=None, cc=(), bcc=(), attachme
     sender = _from(mailbox, from_address)
     msg, rcpts = mailcore.build(sender, to=to, cc=cc, bcc=bcc, subject=subject, text=text, html_body=html,
                                 attachments=attachments, sender_name=from_name)
-    password = _password(mailbox)
-    status = mailcore.send(mailbox, password, msg, rcpts)
-    with mailcore.imap(mailbox, password) as c:
-        mailcore.append(c, mailcore.special_folder(c, "\\Sent", "Sent"), msg)
-    _audit(p, "mail.send", mailbox, {"to": rcpts, "subject": msg["Subject"]})
-    return {"status": status, "message_id": msg["Message-ID"], "recipients": rcpts}
+    return _deliver(p, "send", mailbox, msg, rcpts)
 
 
 def reply(p, mailbox, folder, uid, *, text, reply_all=False, html=None, attachments=()):
@@ -188,12 +186,7 @@ def reply(p, mailbox, folder, uid, *, text, reply_all=False, html=None, attachme
                                 subject=subject.replace("\n", " ").replace("\r", " ")[:900],
                                 text=mailcore.quote(orig, text), html_body=html, attachments=attachments,
                                 in_reply_to=str(orig.get("Message-ID") or "") or None, references=refs or None)
-    status = mailcore.send(mailbox, password, msg, rcpts)
-    with mailcore.imap(mailbox, password) as c:
-        mailcore.append(c, mailcore.special_folder(c, "\\Sent", "Sent"), msg)
-        mailcore.set_flags(c, folder, [uid], answered=True)
-    _audit(p, "mail.reply", mailbox, {"to": rcpts, "uid": uid})
-    return {"status": status, "message_id": msg["Message-ID"], "recipients": rcpts}
+    return _deliver(p, "reply", mailbox, msg, rcpts, after={"answered": [folder, int(uid)]})
 
 
 def forward(p, mailbox, folder, uid, *, to, text="", cc=()):
@@ -207,11 +200,149 @@ def forward(p, mailbox, folder, uid, *, to, text="", cc=()):
         subject = "Fwd: " + subject
     msg, rcpts = mailcore.build(mailbox, to=to, cc=cc, subject=subject[:900], text=text or "Forwarded message attached.")
     mailcore.attach_original(msg, orig)
+    return _deliver(p, "forward", mailbox, msg, rcpts)
+
+
+# ---------- sending, now or after the owner's approval ------------------------------------
+
+APPROVAL_DAYS = 7
+
+
+def _send_now(p, kind, mailbox, msg, rcpts, after=None) -> dict:
+    password = _password(mailbox)
     status = mailcore.send(mailbox, password, msg, rcpts)
     with mailcore.imap(mailbox, password) as c:
         mailcore.append(c, mailcore.special_folder(c, "\\Sent", "Sent"), msg)
-    _audit(p, "mail.forward", mailbox, {"to": rcpts, "uid": uid})
+        if after and after.get("answered"):
+            folder, uid = after["answered"]
+            try:
+                mailcore.set_flags(c, folder, [uid], answered=True)
+            except MailError:
+                pass   # the original was moved meanwhile: the reply still went out
+    _audit(p, f"mail.{kind}", mailbox, {"to": rcpts, "subject": str(msg["Subject"] or "")})
     return {"status": status, "message_id": msg["Message-ID"], "recipients": rcpts}
+
+
+def _deliver(p, kind, mailbox, msg, rcpts, after=None) -> dict:
+    """Send now, or, for connections that may not send on their own (AI assistants by default),
+    keep the exact message until its owner approves it in the console."""
+    if p.direct_send:
+        return _send_now(p, kind, mailbox, msg, rcpts, after)
+    import base64
+    import email.policy
+    raw = base64.b64encode(msg.as_bytes(policy=email.policy.SMTP)).decode()
+    now = time.time()
+    oid = db.execute("INSERT INTO outbox(user_id, mailbox, kind, subject, message, recipients, after, requested_by, "
+                     "created_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     (p.user_id, mailbox, kind, str(msg["Subject"] or "")[:300], "", json.dumps(rcpts),
+                      json.dumps(after or {}), p.requested_by or p.via, now, now + APPROVAL_DAYS * 86400))
+    db.execute("UPDATE outbox SET message = ? WHERE id = ?", (security.encrypt(raw, f"outbox:{oid}"), oid))
+    _audit(p, f"mail.{kind}.queued", mailbox, {"approval_id": oid, "to": rcpts, "subject": str(msg["Subject"] or "")})
+    _notify_approval(p)
+    return {"status": "waiting_for_approval", "approval_id": oid, "recipients": rcpts,
+            "approve_at": f"{config.PUBLIC_URL}/approvals",
+            "note": "Nothing was sent yet. The owner must approve this message in the web console "
+                    "(Approvals). Tell them it is waiting there."}
+
+
+def _notify_approval(p):
+    """Tell the owner something is waiting (at most once every 10 minutes); the email only links
+    to the console, where approving needs a signed-in session."""
+    if security.rate_limited(f"approval-note:{p.user_id}", 1, 600):
+        return
+    from . import auth
+    sender = auth.code_sender()
+    if not sender or sender == p.email:
+        return
+    try:
+        msg, rcpts = mailcore.build(sender, to=[p.email], sender_name=config.APP_NAME,
+                                    subject="An email is waiting for your approval",
+                                    text=(f"{p.requested_by or 'An app'} prepared an email on your behalf. "
+                                          f"Nothing is sent until you approve it:\n\n{config.PUBLIC_URL}/approvals\n"))
+        mailcore.send(sender, _password(sender), msg, rcpts)
+    except Exception:  # noqa: BLE001 - a missing notification must never block the queue
+        pass
+
+
+def _outbox_row(p, oid: int):
+    row = db.one("SELECT * FROM outbox WHERE id = ? AND user_id = ?", (int(oid), p.user_id))
+    if not row:
+        raise NotFound("No such message waiting for approval.")
+    return row
+
+
+def _outbox_message(row):
+    import base64
+    import email.policy
+    raw = base64.b64decode(security.decrypt(row["message"], f"outbox:{row['id']}"))
+    return email.message_from_bytes(raw, policy=email.policy.default)
+
+
+def _expire_outbox():
+    db.execute("UPDATE outbox SET status = 'expired', decided_at = ? WHERE status = 'pending' AND expires_at < ?",
+               (time.time(), time.time()))
+
+
+def list_approvals(p, include_done=False) -> list[dict]:
+    _expire_outbox()
+    rows = db.query("SELECT * FROM outbox WHERE user_id = ? " + ("" if include_done else "AND status = 'pending' ") +
+                    "ORDER BY id DESC LIMIT 100", (p.user_id,))
+    return [{"id": r["id"], "mailbox": r["mailbox"], "kind": r["kind"], "subject": r["subject"],
+             "recipients": json.loads(r["recipients"]), "requested_by": r["requested_by"], "status": r["status"],
+             "created_at": r["created_at"], "decided_at": r["decided_at"]} for r in rows]
+
+
+def approval_detail(p, oid: int) -> dict:
+    _expire_outbox()
+    row = _outbox_row(p, oid)
+    msg = _outbox_message(row)
+    header_rcpts = {a[1].lower() for a in __import__("email.utils").utils.getaddresses(
+        [str(msg.get("To") or ""), str(msg.get("Cc") or "")])}
+    body = msg.get_body(preferencelist=("plain", "html"))
+    return {"id": row["id"], "status": row["status"], "kind": row["kind"], "mailbox": row["mailbox"],
+            "requested_by": row["requested_by"], "created_at": row["created_at"],
+            "from": str(msg.get("From") or ""), "to": str(msg.get("To") or ""), "cc": str(msg.get("Cc") or ""),
+            "bcc": ", ".join(r for r in json.loads(row["recipients"]) if r.lower() not in header_rcpts),
+            "subject": str(msg.get("Subject") or ""), "text": body.get_content() if body else "",
+            "attachments": [{"filename": a.get_filename() or "attachment", "size": len(a.get_payload(decode=True) or b"")}
+                            for a in msg.iter_attachments()],
+            "result": json.loads(row["result"]) if row["result"] else None}
+
+
+def decide_approval(p, oid: int, approve: bool) -> dict:
+    """Only the signed-in owner, in the console, can decide. Tokens and AI assistants can't."""
+    if p.via != "web":
+        raise Forbidden("Messages can only be approved in the web console.")
+    _expire_outbox()
+    with db.tx() as conn:   # claim it, so a double click can't send twice
+        row = conn.execute("SELECT * FROM outbox WHERE id = ? AND user_id = ?", (int(oid), p.user_id)).fetchone()
+        if not row:
+            raise NotFound("No such message waiting for approval.")
+        if row["status"] != "pending":
+            raise Invalid(f"This message is already {row['status']}.")
+        conn.execute("UPDATE outbox SET status = ?, decided_at = ? WHERE id = ?",
+                     ("sending" if approve else "rejected", time.time(), row["id"]))
+    if not approve:
+        _audit(p, "mail.approval.rejected", row["mailbox"], {"approval_id": row["id"]})
+        return {"status": "rejected"}
+    owner = principal_for(p.user_id, via=f"approved:{row['requested_by']}"[:80], ip=p.ip)
+    try:
+        _require(owner, row["mailbox"], "send")   # still allowed to send from this mailbox?
+        result = _send_now(owner, row["kind"], row["mailbox"], _outbox_message(row), json.loads(row["recipients"]),
+                           json.loads(row["after"] or "{}"))
+        status = "sent"
+    except (Forbidden, MailError, Invalid) as e:
+        result, status = {"error": str(e)}, "failed"
+    db.execute("UPDATE outbox SET status = ?, result = ? WHERE id = ?", (status, json.dumps(result, default=str), row["id"]))
+    _audit(p, f"mail.approval.{status}", row["mailbox"], {"approval_id": row["id"]})
+    if status == "failed":
+        raise Invalid(f"It couldn't be sent: {result['error']}")
+    return {"status": status, **result}
+
+
+def pending_count(user_id: int) -> int:
+    return db.one("SELECT COUNT(*) AS n FROM outbox WHERE user_id = ? AND status = 'pending' AND expires_at > ?",
+                  (user_id, time.time()))["n"]
 
 
 def save_draft(p, mailbox, *, to=(), subject="", text="", html=None, cc=(), bcc=(), attachments=()):

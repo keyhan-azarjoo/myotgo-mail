@@ -17,6 +17,11 @@ Only continue if you started this from your own app.</p>
     <span>Also allow <strong>admin</strong> actions (users, mailboxes, aliases). Leave this off unless you need it:
     an AI that reads email could be tricked by a message into using it.</span></label>
   {% endif %}
+  <p class="small"><strong>Emails it sends wait for your approval</strong> on the Approvals page, so it can never send
+  anything you haven't seen.</p>
+  <label class="check warnbox"><input type="checkbox" name="direct_send" value="1">
+    <span>Let it send <strong>without</strong> my approval. Not recommended: an email with hidden instructions could
+    make it send something you didn't intend.</span></label>
   <p class="muted small">It can never do more than your own permissions allow. You can revoke it any time under <em>API &amp; MCP → Connected apps</em>.</p>
   {% if need_code %}<label>Two-step code{% if code_to %} <span class="muted small">(sent to {{ code_to }})</span>{% endif %}
     <input name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
