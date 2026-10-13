@@ -331,7 +331,9 @@ def setup():
     assert admin.set_password(os.environ["ADMIN_PASSWORD"], pw).status_code == 303
     t.MAILBOX_PW[t.ADMIN] = pw
     admin.enable_two_step(t.ADMIN)
-    at = admin.create_token("scenarios admin", ["mail.read", "mail.send", "mail.organize", "admin"], t.ADMIN)
+    # the test's own setup sends seed mail directly; Claude's tokens below need approval like any AI
+    at = admin.create_token("scenarios admin", ["mail.read", "mail.send", "mail.organize", "admin"], t.ADMIN,
+                            direct_send=True)
     OUT["admin_token"] = at
     for box in (ME, ANNA, BOB, VIEWER, EVIL):
         t.MAILBOX_PW[box] = t.ok(t.api(at, "POST", "/admin/mailboxes", json={"address": box}), 201)["password"]
