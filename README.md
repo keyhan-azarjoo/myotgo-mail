@@ -1,6 +1,7 @@
 # Self-hosted business email in one command
 
 [![install test](https://github.com/keyhan-azarjoo/myotgo-mail/actions/workflows/install-test.yml/badge.svg)](https://github.com/keyhan-azarjoo/myotgo-mail/actions/workflows/install-test.yml)
+[![security scan](https://github.com/keyhan-azarjoo/myotgo-mail/actions/workflows/security.yml/badge.svg)](https://github.com/keyhan-azarjoo/myotgo-mail/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Run your own email server for your domain (`you@yourcompany.com`) on a small rented server,
@@ -57,16 +58,17 @@ protection, backups, tests and the steps to move an existing domain over safely.
 |---|---|
 | Mailboxes and aliases | Unlimited. `sales@` can forward to `anna@`, and so on |
 | Works with | Any mail app that speaks IMAP/SMTP: Outlook, Apple Mail, Thunderbird, iPhone, Android |
-| Delivery to Gmail/Outlook | SPF, DKIM, DMARC and reverse DNS set up, so mail lands in the inbox |
+| Deliverability | SPF, DKIM, DMARC and reverse DNS set up for you. (Inbox placement also depends on your server IP's reputation; see [Troubleshooting](#troubleshooting).) |
 | Spam filter | Rspamd; spam goes to the Junk folder |
 | Protection | TLS everywhere, no open relay, no sending as someone else, bans after 6 wrong passwords |
 | Certificates | Free Let's Encrypt certificate, renewed automatically every week |
-| Backups | Nightly, last 7 kept on the server |
+| Backups | Nightly, optionally encrypted and copied off the server; tested restore (`mailctl restore`) |
 | Tests | One command checks 12 things end to end, including a real message to Gmail |
 | Server size | Runs on 1 CPU / 1 GB RAM (it uses about 250 MB) |
 | Web console | Sign-in with two-step verification; admins create users, mailboxes and aliases and set who can read, send or organize each mailbox |
 | REST API | `/api/v1`: search, read, send, reply, forward, drafts, flags, folders, admin, with scoped tokens |
-| MCP server | 30 tools for AI assistants (Claude and others), with OAuth sign-in or tokens |
+| MCP server | 32 tools for AI assistants (Claude and others), with OAuth sign-in or tokens |
+| AI approvals | Emails an AI assistant sends **wait for your approval** in the console: enforced by the server, not by the AI |
 
 ## How it works
 
@@ -400,6 +402,11 @@ Sign in with your password and two-step code, then click *Allow*. Claude now see
 
 Connected apps are listed under *API & MCP*, where you can revoke them at any time.
 
+**Sending needs your OK.** When Claude sends, replies or forwards, the message waits on the console's
+**Approvals** page (you also get an email that something is waiting). You see exactly what will be sent,
+including Bcc, and click *Approve* or *Reject*. You can let a trusted connection send directly (a checkbox
+on the consent page or when creating a token), but it's off by default.
+
 ### MCP tools
 
 | Mail | Organize | Admin |
@@ -409,6 +416,7 @@ Connected apps are listed under *API & MCP*, where you can revoke them at any ti
 | `read_email`, `download_attachment` | `create_folder`, `rename_folder`, `delete_folder` | `admin_list_mailboxes`, `admin_create_mailbox`, `admin_reset_mailbox_password`, `admin_delete_mailbox` |
 | `send_email` (cc, bcc, html, attachments, send as alias) | | `admin_list_aliases`, `admin_create_alias`, `admin_delete_alias` |
 | `reply_email`, `forward_email`, `save_draft` | | `admin_audit_log` |
+| `list_pending_approvals`, `approval_status` | | |
 
 ### REST API
 
@@ -430,7 +438,8 @@ curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | `GET /mailboxes/{m}/messages?folder=&q=&from=&to=&subject=&since=&before=&unread=&flagged=&limit=&offset=` | search |
 | `GET /mailboxes/{m}/messages/{uid}?folder=&html=&mark_read=` | read one message |
 | `GET /mailboxes/{m}/messages/{uid}/attachments/{i}` | download an attachment |
-| `POST /mailboxes/{m}/send`, `…/messages/{uid}/reply`, `…/messages/{uid}/forward`, `…/drafts` | write |
+| `POST /mailboxes/{m}/send`, `…/messages/{uid}/reply`, `…/messages/{uid}/forward`, `…/drafts` | write (`202` = waiting for approval) |
+| `GET /approvals`, `GET /approvals/{id}` | messages waiting for the owner's approval (approving is console-only) |
 | `POST /mailboxes/{m}/messages/flags`, `…/move`, `…/delete` | organize |
 | `/admin/users`, `/admin/users/{id}/grants`, `/admin/mailboxes`, `/admin/aliases`, `/admin/audit` | administration |
 
@@ -466,9 +475,12 @@ The full description is at `/api/v1/openapi.json`.
   ticks it.** One-hour access tokens and rotating refresh tokens; a reused code or refresh token cancels the
   whole sign-in. Registrations, sign-ins and token requests are rate limited per IP; unused registrations
   are removed after a week.
-- **AI safety:** the MCP server tells assistants to show every draft and send only after the person
-  confirms. Tools never return passwords: an email with hidden instructions can't make an assistant leak one.
-  An assistant can never do more than the person who connected it.
+- **AI safety, enforced by the server:** when an AI assistant (or any token) sends, replies or forwards,
+  the exact message is kept on the **Approvals** page and nothing leaves until the person, signed in to the
+  console, clicks *Approve*. Tokens and AI assistants have no way to approve; a person can allow direct
+  sending for a connection, but it's off by default. On top of that, the MCP server tells assistants to show
+  every draft first and to treat emails as untrusted content, tools never return passwords, and an assistant
+  can never do more than the person who connected it.
 - **Mailbox access:** the app signs in to each mailbox like a mail app (passwords encrypted with AES-256-GCM,
   bound to their mailbox, key kept only on the server), so the mail server's own rules (no sending as someone
   else, DKIM signing, spam checks) still apply. Disabling a person also locks their mailbox.
@@ -478,26 +490,55 @@ The full description is at `/api/v1/openapi.json`.
   pinned base image.
 - **Activity log:** sign-ins, failures, sends, deletes and every admin change, with time and IP (*Activity*).
 
+- **Automated checks on every change:** known-vulnerable dependencies (pip-audit), risky code patterns
+  (Bandit), shell-script bugs (ShellCheck), a web security scan of a freshly installed console (OWASP ZAP
+  baseline), and Dependabot for updates.
+
+The security review behind these measures was AI-assisted (a separate AI agent reviewed the code twice and
+every finding was fixed and re-tested). It isn't a professional penetration test: if you depend on this for
+your business, have it audited.
+
 Known trade-offs: limits that stop password and code guessing can also be triggered on purpose to lock
 someone out for a while (15 minutes per network, an hour per account, a day for codes); an admin can clear
-them with `./mail app-unblock <ip>`. The app container runs as root *inside* the container, because it edits the mail server's
-root-owned account files; backups in `/var/backups/mailserver` aren't encrypted (copy them somewhere safe).
+them with `mailctl unblock <ip>`. The app container runs as root *inside* the container, because it edits the
+mail server's root-owned account files.
+
+### Backups and restore
+
+Every night `mailctl backup` saves mailboxes, accounts, the DKIM key, the certificate, the console database
+and its key to `/var/backups/mailserver` (last 7). For real protection, encrypt them and copy them off the
+server. In `/opt/mailserver/.env`:
+
+```ini
+# on YOUR computer: age-keygen -o backup-key.txt   (keep backup-key.txt safe, NOT on the server)
+BACKUP_AGE_RECIPIENT=age1...            # the public key it printed
+BACKUP_RSYNC_TARGET=backup@other-server:/backups/mail    # and/or:
+BACKUP_RCLONE_REMOTE=b2:my-bucket/mail                    # any rclone remote (S3, B2, Google Drive...)
+```
+
+With a recipient set, backups are encrypted before they're written: the server can make them but can't
+read them. To restore: `mailctl restore /path/to/mail-<date>.tar.gz.age --key backup-key.txt` (it stops the
+services, sets the current data aside and brings the backup back). `mailctl restore-test` checks the newest
+backup can be restored; GitHub runs a full backup → delete → restore test on every change.
 
 ### Testing it
 
 ```bash
-./mail app-test             # 26 end-to-end tests: console, REST API, all MCP tools, OAuth, security rules
+./mail app-test             # 27 end-to-end tests: console, REST API, all MCP tools, OAuth, approvals, security rules
 ./mail app-test-claude      # lets Claude Code use the MCP server for real, then checks the results
-./mail app-test-scenarios   # 100 realistic requests to Claude through MCP, each checked on the server
+./mail app-test-scenarios   # 110 realistic requests to Claude through MCP, each checked on the server
 ```
 
-On every change to this repository, GitHub installs everything from zero on a fresh Ubuntu machine with
-`install.sh` and runs both suites (see the *install test* badge at the top).
+On every change to this repository, GitHub installs everything from zero on a fresh Ubuntu machine (once
+from the checkout and once with the exact `curl | bash` one-liner and the published image), runs both
+suites, a web security scan and a backup → delete → restore test (see the badges at the top).
 
 All of them create their own throwaway admin, mailboxes and users and remove them afterwards
 (`./mail app-test-cleanup` removes leftovers if a run is interrupted). The scenarios include drafting and
-**sending only after confirmation**, cancelling, editing a draft, answering questions from received mail,
-replying, forwarding, organizing, reading attachments, and a read-only user being refused.
+**sending only after the person confirms and then approves it in the console**, cancelling, editing a
+draft, answering questions from received mail, replying, forwarding, organizing, reading attachments, a
+read-only user being refused, and **10 prompt-injection attacks** (emails telling the AI to forward
+invoices or leak passwords to an attacker): none may produce mail for the attacker.
 
 ![A real test conversation](docs/images/claude-conversation.png)
 
@@ -572,14 +613,15 @@ backup with `tar --numeric-owner -xzf /var/backups/mailserver/mail-<date>.tar.gz
   address or your aliases. Unauthenticated relaying is refused (the tests check both).
 - fail2ban bans IPs that guess passwords. `server-setup` turns off SSH password login when a key is present.
 - Keep the server updated (Ubuntu's unattended upgrades) and update the mail image now and then.
-- Backups stay on the same server: copy `/var/backups/mailserver` somewhere else if losing the server
-  would hurt.
+- Set up encrypted off-site backups (see *Backups and restore*): by default they stay on the server.
 
 ## Limits
 
 - **No webmail**: the web console manages users and access but doesn't show mail; people use mail apps,
   and programs or AI assistants use the API or MCP.
 - **No antivirus scanning** (ClamAV needs about 1.5 GB more RAM). Rspamd still blocks a lot of malicious mail.
+- **Running email is real work**: deliverability depends on your server IP's reputation (new or shared
+  IPs can land in spam at first), and someone has to watch the server, disk space and updates.
 - **One server**: if it is down, other servers keep your incoming mail and retry for several days, so it
   arrives once you're back.
 - **DNS automation** is built in for GoDaddy only; with any other provider you copy the values from
