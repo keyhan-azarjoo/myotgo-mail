@@ -453,7 +453,7 @@ The full description is at `/api/v1/openapi.json`.
   They come from an authenticator app (recommended) or are emailed to an address outside this server.
   An admin can allow a dedicated codes mailbox on the server (*Settings*), never the person's own.
 - **Passwords:** Argon2id (at most 3 hashed at once, so a flood of sign-ins can't exhaust memory); mailbox
-  passwords as SHA512-CRYPT with 200,000 rounds in a file only root can read; at least 12 characters; temporary
+  passwords as SHA512-CRYPT with 50,000 rounds in a file only root can read; at least 12 characters; temporary
   passwords must be changed at first sign-in.
 - **Two-step verification:** 6-digit codes that work once (email codes expire in 10 minutes, and a new code
   cancels the previous one), plus 10 single-use recovery codes. At most 10 wrong codes per 15 minutes and 30 per

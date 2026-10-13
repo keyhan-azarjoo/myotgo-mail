@@ -57,9 +57,9 @@ def _write(path: Path, lines: list[str]) -> None:
 
 
 def _hash(password: str) -> str:
-    # SHA512-CRYPT like `setup email add`, but with 200,000 rounds instead of 5,000: the hash is
-    # as slow to crack as it can be while a mail-app sign-in still takes well under a second.
-    return "{SHA512-CRYPT}" + sha512_crypt.using(rounds=200_000).hash(password)
+    # SHA512-CRYPT like `setup email add`, with 50,000 rounds instead of 5,000: ten times slower to
+    # crack, while each sign-in (the console signs in for every API/MCP call) stays cheap on a small server.
+    return "{SHA512-CRYPT}" + sha512_crypt.using(rounds=50_000).hash(password)
 
 
 # ---------- mailboxes -----------------------------------------------------------------

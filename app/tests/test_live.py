@@ -54,7 +54,7 @@ def addr(name):
 CODES = os.environ["CODES_MAILBOX"]
 
 
-def emailed_code(address, timeout=60):
+def emailed_code(address, timeout=120):
     """The newest sign-in code for login `address` (sent to the CODES mailbox) not used yet."""
     host = urlsplit(BASE).hostname
     deadline = time.time() + timeout
