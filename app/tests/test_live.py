@@ -71,8 +71,8 @@ def emailed_code(address, timeout=60):
                         S["seen_codes"].add((address, m.group(1).decode()))
                         return m.group(1).decode()
                     break   # only the newest code is valid
-        except (imaplib.IMAP4.abort, ssl.SSLError, OSError):
-            pass   # a dropped connection under load: try again
+        except (imaplib.IMAP4.error, ssl.SSLError, OSError):
+            pass   # a dropped connection or a slow sign-in under load: try again
         time.sleep(2)
     raise AssertionError(f"no sign-in code arrived for {address}")
 
