@@ -47,6 +47,11 @@ for _ in $(seq 1 60); do
   app=$(docker inspect mailapp --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
   mail=$(docker inspect mailserver --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
   [[ $app == healthy && $mail == healthy ]] && { echo "mail server and console are up"; exit 0; }
+  # a brand-new install has no mailbox yet, and the mail server waits for one before it starts
+  if [[ $app == healthy && ! -s data/config/postfix-accounts.cf ]] &&
+     [[ $(docker inspect mailserver --format '{{.State.Running}}' 2>/dev/null) == true ]]; then
+    echo "console is up; the mail server starts once the first mailbox exists"; exit 0
+  fi
   sleep 5
 done
 echo "ERROR: after 5 minutes: mailserver=$mail, mailapp=$app. Last lines of the console log:" >&2
