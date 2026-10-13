@@ -24,9 +24,13 @@ if docker ps --format '{{.Names}}' | grep -qx mailapp; then
   docker exec mailapp python -c "import sqlite3;s=sqlite3.connect('/data/app.db');d=sqlite3.connect('/data/backup.db');s.backup(d);d.close()"
 fi
 
-tar --numeric-owner --warning=no-file-ignored -czf "$work/mail-$stamp.tar.gz" \
+# exit code 1 from GNU tar means "a file changed while being read" (the spam filter's live state):
+# that copy is still fine, and the next backup has the newer version. Anything else is a real error.
+status=0
+tar --numeric-owner --warning=no-file-ignored --warning=no-file-changed -czf "$work/mail-$stamp.tar.gz" \
   --exclude='data/mail-logs' --exclude='data/app/app.db' --exclude='data/app/app.db-wal' --exclude='data/app/app.db-shm' \
-  data secrets .env
+  data secrets .env || status=$?
+(( status == 0 || status == 1 )) || { echo "backup failed (tar exit $status)" >&2; exit "$status"; }
 rm -f data/app/backup.db
 
 if [[ -n ${BACKUP_AGE_RECIPIENT:-} ]]; then
