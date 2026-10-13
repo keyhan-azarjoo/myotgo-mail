@@ -43,5 +43,9 @@ DNS_CREDENTIALS=~/.mail-secrets/dns.env
 # DKIM selector name (the DNS record will be <selector>._domainkey.DOMAIN)
 DKIM_SELECTOR=mail
 
+# Your own servers that send mail through this one, e.g. an app server (space separated IPs).
+# They're never banned by fail2ban; they still have to sign in with a mailbox password.
+TRUSTED_IPS=
+
 # Addresses that forward to the first mailbox you create (comma separated, optional)
 DEFAULT_ALIASES=postmaster,abuse

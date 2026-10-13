@@ -15,7 +15,7 @@ if [[ ! -f secrets/app.env ]]; then
   (umask 077; echo "APP_SECRET_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')" > secrets/app.env)
 fi
 
-sed "s/SERVER_IP/$SERVER_IP/" config/fail2ban-jail.cf > data/config/fail2ban-jail.cf
+sed -e "s/SERVER_IP/$SERVER_IP/" -e "s#TRUSTED_IPS#${TRUSTED_IPS:-}#" config/fail2ban-jail.cf > data/config/fail2ban-jail.cf
 cp config/postfix-main.cf data/config/postfix-main.cf
 
 if command -v ufw >/dev/null; then

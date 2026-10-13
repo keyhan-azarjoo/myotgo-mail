@@ -3,7 +3,8 @@
 [DEFAULT]
 # Never banned: localhost, the server itself (tests can run from it) and the console app,
 # which only uses stored mailbox passwords and has its own sign-in limits.
-ignoreip = 127.0.0.1/8 SERVER_IP 172.31.250.10
+# TRUSTED_IPS: your own servers that send through this one (set in .env), e.g. an app server.
+ignoreip = 127.0.0.1/8 SERVER_IP 172.31.250.10 TRUSTED_IPS
 # A ban lasts one day, so a mistyped password in a mail app doesn't lock you out for a week.
 bantime = 1d
 findtime = 1h

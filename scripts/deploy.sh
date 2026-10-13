@@ -13,8 +13,8 @@ rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
   "$ROOT/" "$SSH_TARGET:$REMOTE_DIR/"
 
 # Settings the server-side scripts and compose.yaml read
-printf 'MAIL_HOST=%s\nDOMAIN=%s\nSERVER_IP=%s\nACME_EMAIL=%s\nCERT_METHOD=%s\nDNS_PROVIDER=%s\nAPP_BUILD=%s\n' \
-  "$MAIL_HOST" "$DOMAIN" "$SERVER_IP" "$ACME_EMAIL" "$CERT_METHOD" "${DNS_PROVIDER:-}" "${APP_BUILD:-0}" |
+printf 'MAIL_HOST=%s\nDOMAIN=%s\nSERVER_IP=%s\nACME_EMAIL=%s\nCERT_METHOD=%s\nDNS_PROVIDER=%s\nAPP_BUILD=%s\nTRUSTED_IPS=%s\n' \
+  "$MAIL_HOST" "$DOMAIN" "$SERVER_IP" "$ACME_EMAIL" "$CERT_METHOD" "${DNS_PROVIDER:-}" "${APP_BUILD:-0}" "${TRUSTED_IPS:-}" |
   remote "umask 077 && cat > '$REMOTE_DIR/.env'"
 
 if [[ $CERT_METHOD == dns ]]; then

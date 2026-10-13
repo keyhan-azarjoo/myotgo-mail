@@ -125,6 +125,8 @@ APP_BUILD=${APP_BUILD:-0}
 $ca_line
 # Off-site, encrypted backups (recommended). Make a key pair on YOUR computer with: age-keygen -o backup-key.txt
 # and paste only its public key (age1...) here. Keep backup-key.txt safe and off this server.
+# Your own servers that send mail through this one (space separated IPs): never banned by fail2ban
+TRUSTED_IPS=${TRUSTED_IPS:-}
 BACKUP_AGE_RECIPIENT=${BACKUP_AGE_RECIPIENT:-}
 BACKUP_RSYNC_TARGET=${BACKUP_RSYNC_TARGET:-}
 BACKUP_RCLONE_REMOTE=${BACKUP_RCLONE_REMOTE:-}
