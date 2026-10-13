@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Add {{ s.address }} to a device · {{ app_name }}{% endblock %}
+{% block content %}
+<h1>Add {{ s.address }} to a phone or computer</h1>
+
+<section class="box center">
+  <img class="qr" src="{{ qr }}" alt="QR code that opens the setup page for {{ s.address }}">
+  <p>Scan with the phone's camera and open the link.</p>
+  <p class="muted small">The code works for {{ minutes }} minutes and holds no password. Only the mailbox password lets anyone in.
+  On this computer: <a href="{{ link }}">open the setup page</a>.</p>
+</section>
+
+<section class="box">
+  <h2>iPhone, iPad and Mac (Mail app)</h2>
+  <ol class="steps">
+    <li>Scan the code and tap <strong>Install on this device</strong>, then <strong>Allow</strong>.</li>
+    <li>Open <strong>Settings</strong> (on a Mac: <strong>System Settings</strong>) → <strong>Profile Downloaded</strong> → <strong>Install</strong>.</li>
+    <li>Type the mailbox password when asked. That's all.</li>
+  </ol>
+</section>
+
+<section class="box">
+  <h2>Outlook, Gmail app, Android and others</h2>
+  <p class="muted small">These apps can't be set up from a code. Add an account, choose <strong>IMAP</strong>, and type:</p>
+  {% include "_mail_settings.html" %}
+</section>
+{% endblock %}

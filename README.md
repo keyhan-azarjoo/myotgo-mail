@@ -307,6 +307,21 @@ Until then, receiving and reading work; outgoing mail to other domains waits in 
 
 ## Add the mailbox to Outlook and other apps
 
+### The quick way: scan a QR code (iPhone, iPad, Mac)
+In the console, on **Mailboxes**, click **Add to phone or Mac** next to the mailbox. Scan the code with
+the phone's camera, tap **Install on this device** → **Allow**, then **Settings → Profile Downloaded →
+Install** (on a Mac: **System Settings**). Type the mailbox password when asked: the account appears in
+the Mail app.
+
+- The code opens a link that works for one hour. It holds the server settings and the address, never the
+  password, so a photo of the code alone doesn't get anyone in.
+- The profile is signed with the server's certificate, so the device shows it as **Verified**.
+- Installing it again replaces it. To remove it: **Settings → General → VPN & Device Management**.
+- Outlook, the Gmail app and Android can't be set up from a code. The page behind the code also lists
+  the settings for them; or follow the steps below.
+
+### By hand
+
 `./mail outlook you@yourcompany.com` prints the values for any address:
 
 | Setting | Value |

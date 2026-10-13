@@ -30,6 +30,7 @@ import ssl
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.serialization import pkcs7
 
 CA = os.environ.get("MAIL_CA_FILE")   # only for test installs with a private CA
 if CA:
@@ -316,6 +317,32 @@ def test_06_user_signs_in_and_gets_token():
     assert boxes == {S["A"]: ["read"], S["B"]: ["read", "send", "organize"]}
     # pages for admins are refused
     assert b.get("/admin/users").status_code == 403
+
+
+def test_06b_device_setup_qr_code():
+    b = S["user"]
+    page = b.get(f"/setup/{S['B']}")
+    assert page.status_code == 200 and "data:image/svg+xml" in page.text
+    token = re.search(r"/d/([\w-]+\.\d+\.[\w-]+)", page.text).group(1)
+    assert b.get(f"/setup/{addr('nobody')}").status_code == 403          # only mailboxes you can use
+    assert Browser().get(f"/setup/{S['B']}").status_code == 303         # signed-in only
+    # the link in the code works without signing in, and holds no password
+    anon = Browser().c
+    assert S["B"] in anon.get(f"/d/{token}").text
+    r = anon.get(f"/d/{token}/mail.mobileconfig")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/x-apple-aspen-config"
+    body = r.content
+    assert body[:1] == b"\x30" and b"<plist" in body                    # signed (DER) with the plist inside
+    assert S["B"].encode() in body and b"EmailAuthPassword" in body
+    assert b"<key>IncomingPassword</key>" not in body and b"<key>OutgoingPassword</key>" not in body and MAILBOX_PW.get(S["B"], "unset").encode() not in body
+    certs = pkcs7.load_der_pkcs7_certificates(body)                    # signed with the server's certificate
+    assert any(urlsplit(BASE).hostname in str(c.extensions) for c in certs)
+    # forged, altered and other-mailbox tokens are refused
+    enc, expires, sig = token.split(".")
+    other = base64.urlsafe_b64encode(S["A"].encode()).decode().rstrip("=")
+    for bad in (f"{other}.{expires}.{sig}", f"{enc}.{int(expires) + 999}.{sig}", f"{enc}.{expires}.{'A' * len(sig)}", "x"):
+        assert anon.get(f"/d/{bad}").status_code == 404
+        assert anon.get(f"/d/{bad}/mail.mobileconfig").status_code == 404
 
 
 # ---------- 2. mail over the REST API ---------------------------------------------------------------

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Set up {{ s.address }}{% endblock %}
+{% block main_class %}page narrowpage{% endblock %}
+{% block content %}
+<h1>Set up {{ s.address }}</h1>
+
+<section class="box">
+  <h2>iPhone, iPad or Mac</h2>
+  <p><a class="button primary" href="/d/{{ token }}/mail.mobileconfig">Install on this device</a></p>
+  <ol class="steps">
+    <li>Tap <strong>Allow</strong> to download the profile.</li>
+    <li>Open <strong>Settings</strong> (on a Mac: <strong>System Settings</strong>) → <strong>Profile Downloaded</strong> → <strong>Install</strong>.</li>
+    <li>Type the mailbox password when asked. The account appears in the Mail app.</li>
+  </ol>
+</section>
+
+<section class="box">
+  <h2>Outlook, Android and other apps</h2>
+  <p class="muted small">Add an account, choose <strong>IMAP</strong>, and type:</p>
+  {% include "_mail_settings.html" %}
+</section>
+{% endblock %}

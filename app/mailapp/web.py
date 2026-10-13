@@ -9,10 +9,10 @@ from urllib.parse import quote, urlsplit
 
 import segno
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import auth, config, db, oauth, security, service
+from . import auth, config, db, devices, mailconf, oauth, security, service
 from .mailcore import MailError
 
 router = APIRouter()
@@ -418,6 +418,45 @@ def connect(request: Request):
     sess = _session(request)
     return _render(request, "connect.html", sess, mcp_url=config.MCP_URL, api_url=f"{config.PUBLIC_URL}/api/v1",
                    mail_host=config.MAIL_HOST)
+
+
+# ---------- add a mailbox to a phone or computer with a QR code ---------------------------------
+
+@router.get("/setup/{address}", response_class=HTMLResponse)
+@guarded
+def device_setup(request: Request, address: str):
+    sess = _session(request)
+    address = address.strip().lower()
+    if address not in service.mailbox_permissions(_p(request, sess)):
+        raise service.Forbidden(f"You don't have access to {address}.")
+    link = f"{config.PUBLIC_URL}/d/{devices.make_link(address)}"
+    qr = segno.make(link, error="m").svg_data_uri(scale=5, dark="#0f172a")
+    return _render(request, "setup.html", sess, s=devices.settings(address), qr=qr, link=link,
+                   minutes=devices.LINK_SECONDS // 60)
+
+
+def _device_address(token: str) -> str:
+    address = devices.check_link(token)
+    if not address or address not in mailconf.list_accounts():
+        raise Gate(HTMLResponse("This setup link has expired or isn't valid. Open the console and show the "
+                                "QR code again.", status_code=404))
+    return address
+
+
+@router.get("/d/{token}", response_class=HTMLResponse)
+@guarded
+def device_page(request: Request, token: str):
+    address = _device_address(token)
+    return _render(request, "device.html", s=devices.settings(address), token=token)
+
+
+@router.get("/d/{token}/mail.mobileconfig")
+@guarded
+def device_profile(request: Request, token: str):
+    address = _device_address(token)
+    db.audit(address, "device.profile", address, None, _ip(request))
+    return Response(devices.profile(address), media_type="application/x-apple-aspen-config", headers={
+        "Content-Disposition": f'attachment; filename="{address}.mobileconfig"', "Cache-Control": "no-store"})
 
 
 # ---------- admin: users ------------------------------------------------------------------------
