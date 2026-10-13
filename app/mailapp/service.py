@@ -285,8 +285,11 @@ def _expire_outbox():
 
 def list_approvals(p, include_done=False) -> list[dict]:
     _expire_outbox()
-    rows = db.query("SELECT * FROM outbox WHERE user_id = ? " + ("" if include_done else "AND status = 'pending' ") +
-                    "ORDER BY id DESC LIMIT 100", (p.user_id,))
+    if include_done:
+        rows = db.query("SELECT * FROM outbox WHERE user_id = ? ORDER BY id DESC LIMIT 100", (p.user_id,))
+    else:
+        rows = db.query("SELECT * FROM outbox WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 100",
+                        (p.user_id,))
     return [{"id": r["id"], "mailbox": r["mailbox"], "kind": r["kind"], "subject": r["subject"],
              "recipients": json.loads(r["recipients"]), "requested_by": r["requested_by"], "status": r["status"],
              "created_at": r["created_at"], "decided_at": r["decided_at"]} for r in rows]

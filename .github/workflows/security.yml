@@ -1,0 +1,25 @@
+# Security checks on every change: known-vulnerable dependencies, risky Python patterns, shell bugs.
+name: security scan
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"   # weekly, to catch newly published vulnerabilities
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Known vulnerabilities in dependencies (pip-audit)
+        run: pip install -q pip-audit && pip-audit -r app/requirements.txt && pip-audit -r app/tests/requirements.txt
+      - name: Risky Python patterns (Bandit, medium and high)
+        run: pip install -q bandit && bandit -q -r app/mailapp -ll
+      - name: Shell scripts (ShellCheck)
+        run: shellcheck -S warning install.sh mailctl mail scripts/*.sh

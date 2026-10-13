@@ -34,7 +34,10 @@ DNS
   dns check                  check them on public DNS
 
 Running it
-  status | logs | queue [flush] | backup | restart
+  status | logs | queue [flush] | restart
+  backup                     make a backup now (one is made every night; see BACKUP_* in .env)
+  restore <file> [--key k]   restore a backup (--key: the private key for encrypted backups)
+  restore-test [--live]      check the newest backup can be restored (--live: really delete and restore)
   update                     download the latest version and apply it
   test <address>             end-to-end test of the mail server (certificates, sending, receiving, security)
   test-app                   end-to-end test of the console, API, MCP and OAuth (26 tests)
@@ -100,6 +103,31 @@ case "$cmd" in
   logs) docker exec mailserver tail -f /var/log/mail/mail.log ;;
   queue) if [[ ${1:-} == flush ]]; then docker exec mailserver postqueue -f && echo "retrying now"; else docker exec mailserver postqueue -p; fi ;;
   backup) scripts/backup.sh ;;
+  restore) scripts/restore.sh "$@" ;;
+  restore-test)
+    # make a backup now and check it can be restored; with --live, really delete and restore a test mailbox
+    scripts/backup.sh >/dev/null
+    latest=$(ls -t /var/backups/mailserver/mail-*.tar.gz* | head -1)
+    if [[ ${1:-} != --live ]]; then
+      scripts/restore.sh --check "$latest" "${@:2}"; exit
+    fi
+    marker="e2e-restore-$(openssl rand -hex 3)@$DOMAIN"; p=$(newpass)
+    printf '%s\n' "$p" | app mailbox-password "$marker" >/dev/null
+    scripts/backup.sh >/dev/null
+    latest=$(ls -t /var/backups/mailserver/mail-*.tar.gz* | head -1)
+    dms email del -y "$marker" >/dev/null
+    sleep 5
+    if python3 -c "import imaplib,ssl,sys;c=ssl.create_default_context(cafile=sys.argv[3] or None);i=imaplib.IMAP4_SSL(sys.argv[4],993,ssl_context=c);i.login(sys.argv[1],sys.argv[2])" "$marker" "$p" "${MAIL_CA_FILE:-}" "$MAIL_HOST" 2>/dev/null; then
+      echo "the test mailbox still works after deleting it: test is invalid" >&2; exit 1
+    fi
+    scripts/restore.sh "$latest" --yes
+    for i in $(seq 1 60); do
+      python3 -c "import imaplib,ssl,sys;c=ssl.create_default_context(cafile=sys.argv[3] or None);i=imaplib.IMAP4_SSL(sys.argv[4],993,ssl_context=c);i.login(sys.argv[1],sys.argv[2])" "$marker" "$p" "${MAIL_CA_FILE:-}" "$MAIL_HOST" 2>/dev/null && break
+      [[ $i == 60 ]] && { echo "RESTORE TEST FAILED: the deleted mailbox didn't come back" >&2; exit 1; }
+      sleep 3
+    done
+    dms email del -y "$marker" >/dev/null; rm -rf data.before-restore-*
+    echo "restore test passed: a deleted mailbox came back from the backup and its password works" ;;
   restart) docker compose restart ;;
   update)
     if [[ -d .git ]]; then git pull --ff-only; fi

@@ -41,3 +41,14 @@ if [[ ${APP_BUILD:-0} == 1 ]] || ! docker compose pull -q app 2>/dev/null; then
 fi
 docker compose up -d --remove-orphans
 docker image prune -f >/dev/null
+
+# don't report success unless both services really came up
+for _ in $(seq 1 60); do
+  app=$(docker inspect mailapp --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
+  mail=$(docker inspect mailserver --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
+  [[ $app == healthy && $mail == healthy ]] && { echo "mail server and console are up"; exit 0; }
+  sleep 5
+done
+echo "ERROR: after 5 minutes: mailserver=$mail, mailapp=$app. Last lines of the console log:" >&2
+docker logs mailapp --tail 30 >&2 2>&1 || true
+exit 1

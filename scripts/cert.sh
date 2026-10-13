@@ -49,6 +49,10 @@ esac
 
 status=0
 docker run "${docker_args[@]}" goacme/lego:v5.5.2 run "${args[@]}" || status=$?
+if [[ $status -ne 0 && ${CERT_METHOD:-http} == http ]]; then
+  echo "The certificate couldn't be issued. Check that $MAIL_HOST points to this server and that inbound" >&2
+  echo "TCP port 80 is allowed, including any firewall in your hosting provider's control panel." >&2
+fi
 if [[ ${CERT_METHOD:-http} == http ]] && command -v ufw >/dev/null; then
   ufw delete allow 80/tcp >/dev/null || true
 fi

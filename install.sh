@@ -58,8 +58,10 @@ ask MAIL_HOST "Name of this mail server" "mx.$DOMAIN"
 MAIL_HOST=$(tr 'A-Z' 'a-z' <<<"$MAIL_HOST"); [[ $MAIL_HOST == *."$DOMAIN" ]] || die "MAIL_HOST must end in .$DOMAIN"
 ask ADMIN_EMAIL "Your own mailbox (it's also your admin login)" "admin@$DOMAIN"
 valid_email "$ADMIN_EMAIL" || die "'$ADMIN_EMAIL' isn't an email address"
-ask ACME_EMAIL "An email OUTSIDE this server for certificate notices" "$ADMIN_EMAIL"
+ask ACME_EMAIL "An email OUTSIDE $DOMAIN for certificate and problem notices (e.g. a Gmail)" ""
 valid_email "$ACME_EMAIL" || die "'$ACME_EMAIL' isn't an email address"
+# if this server has a problem, a warning sent to an address on this same server would never arrive
+[[ $ACME_EMAIL != *@"$DOMAIN" ]] || die "use an address outside $DOMAIN for ACME_EMAIL (for example your Gmail)"
 detected_ip=$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 ask SERVER_IP "This server's public IPv4 address" "$detected_ip"
 [[ $SERVER_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "'$SERVER_IP' isn't an IPv4 address"
@@ -74,7 +76,7 @@ fi
 bold "1/6  Preparing the server"
 export DEBIAN_FRONTEND=noninteractive
 apt-get -qq update
-apt-get -qq install -y ca-certificates curl git ufw fail2ban openssl python3 python3-venv dnsutils >/dev/null
+apt-get -qq install -y ca-certificates curl git ufw fail2ban openssl python3 python3-venv dnsutils age rsync >/dev/null
 if ! command -v docker >/dev/null; then
   info "installing Docker"
   curl -fsSL https://get.docker.com | sh >/dev/null
@@ -101,7 +103,8 @@ if [[ -n ${MAILSERVER_SRC:-} ]]; then
 elif [[ -d $DIR/.git ]]; then
   git -C "$DIR" pull --ff-only -q
 else
-  [[ ! -e $DIR || -z $(ls -A "$DIR" 2>/dev/null | grep -v '^data$\|^secrets$\|^\.env$') ]] || die "$DIR exists and isn't a git checkout"
+  [[ ! -e $DIR || -z $(find "$DIR" -mindepth 1 -maxdepth 1 ! -name data ! -name secrets ! -name .env -print -quit) ]] ||
+    die "$DIR exists and isn't a git checkout"
   tmp=$(mktemp -d); git clone -q --depth 1 "$REPO" "$tmp"; cp -a "$tmp"/. "$DIR"/; rm -rf "$tmp"
 fi
 cd "$DIR"
@@ -120,6 +123,11 @@ DNS_PROVIDER=${DNS_PROVIDER:-}
 APP_IMAGE=${APP_IMAGE:-ghcr.io/keyhan-azarjoo/myotgo-mail-app:latest}
 APP_BUILD=${APP_BUILD:-0}
 $ca_line
+# Off-site, encrypted backups (recommended). Make a key pair on YOUR computer with: age-keygen -o backup-key.txt
+# and paste only its public key (age1...) here. Keep backup-key.txt safe and off this server.
+BACKUP_AGE_RECIPIENT=${BACKUP_AGE_RECIPIENT:-}
+BACKUP_RSYNC_TARGET=${BACKUP_RSYNC_TARGET:-}
+BACKUP_RCLONE_REMOTE=${BACKUP_RCLONE_REMOTE:-}
 EOF
 )
 ln -sf "$DIR/mailctl" /usr/local/bin/mailctl
@@ -128,6 +136,9 @@ info "installed in $DIR; command: mailctl"
 # ---------- DNS before the certificate -----------------------------------------------------------
 bold "3/6  Checking that $MAIL_HOST points to this server"
 if [[ $CERT_METHOD == http ]]; then
+  info "The certificate check uses port 80 for a few seconds. This server's firewall is handled here, but if"
+  info "your hosting provider has its own firewall in its control panel, it must allow inbound TCP 80 and 443"
+  info "(and 25, 465, 587, 993 for mail)."
   for i in $(seq 1 60); do
     resolved=$(dig +short A "$MAIL_HOST" @1.1.1.1 | tail -1)
     [[ $resolved == "$SERVER_IP" ]] && { info "$MAIL_HOST -> $SERVER_IP: ok"; break; }

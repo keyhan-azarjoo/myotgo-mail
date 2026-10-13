@@ -77,7 +77,7 @@ def build_app():
             allowed_hosts=[host, f"{host}:443", f"{host}:*"],
             allowed_origins=[config.PUBLIC_URL],
         ),
-        host="0.0.0.0",
+        host="0.0.0.0",  # nosec B104 - inside the container; only the published port is reachable
         stateless_http=True,
         json_response=True,
     )
@@ -194,7 +194,8 @@ class SecurityHeaders:
 
 
 def main():
-    uvicorn.run(build_app(), host="0.0.0.0", port=config.LISTEN_PORT, ssl_certfile=config.TLS_CERT,
+    # nosec B104: listening on all interfaces is inside the container; only the published port is reachable
+    uvicorn.run(build_app(), host="0.0.0.0", port=config.LISTEN_PORT, ssl_certfile=config.TLS_CERT,  # nosec B104
                 ssl_keyfile=config.TLS_KEY, ssl_version=ssl.PROTOCOL_TLS_SERVER,
                 ssl_ciphers="ECDHE+AESGCM:ECDHE+CHACHA20",   # TLS 1.2 forward-secret AEAD only; 1.3 as negotiated
                 proxy_headers=False, server_header=False, date_header=True,

@@ -23,7 +23,8 @@ def main():
     assert admin.set_password(os.environ["ADMIN_PASSWORD"], pw).status_code == 303
     t.MAILBOX_PW[t.ADMIN] = pw          # the login and its mailbox share one password
     admin.enable_two_step(t.ADMIN)
-    token = admin.create_token("claude check", ["mail.read", "mail.send", "mail.organize", "admin"], t.ADMIN)
+    token = admin.create_token("claude check", ["mail.read", "mail.send", "mail.organize", "admin"], t.ADMIN,
+                               direct_send=True)
     a, b = t.addr("claude-a"), t.addr("claude-b")
     for box in (a, b):
         t.ok(t.api(token, "POST", "/admin/mailboxes", json={"address": box}), 201)

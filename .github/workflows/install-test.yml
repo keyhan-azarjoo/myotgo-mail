@@ -22,6 +22,29 @@ jobs:
         run: sudo mailctl test admin@example.test
       - name: Console, API, MCP and OAuth tests
         run: sudo mailctl test-app
+      - name: Web security scan (OWASP ZAP baseline)
+        run: |
+          ip=$(hostname -I | awk '{print $1}')
+          mkdir -p zap && chmod 777 zap
+          sudo docker run --rm --network host --add-host "mx.example.test:$ip" -v "$PWD/zap:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t https://mx.example.test/login -I -r zap-report.html
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: zap/zap-report.html
+          if-no-files-found: ignore
+      - name: Backup, delete, restore (live)
+        run: sudo mailctl restore-test --live
+      - name: Encrypted backup can only be read with the private key
+        run: |
+          age-keygen -o key.txt 2>/dev/null
+          pub=$(grep -o 'age1[0-9a-z]*' key.txt)
+          sudo sed -i "s/^BACKUP_AGE_RECIPIENT=.*/BACKUP_AGE_RECIPIENT=$pub/" /opt/mailserver/.env
+          sudo mailctl backup
+          latest=$(sudo bash -c 'ls -t /var/backups/mailserver/mail-*.tar.gz.age | head -1')
+          ! sudo mailctl restore --check "$latest"                    # refused without the key
+          sudo mailctl restore --check "$latest" --key "$PWD/key.txt" # verified with it
       - name: Logs on failure
         if: failure()
         run: |
