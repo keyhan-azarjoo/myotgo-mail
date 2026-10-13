@@ -39,7 +39,7 @@ def _ssl() -> ssl.SSLContext:
 def imap(address: str, password: str):
     try:
         client = IMAPClient(config.IMAP_HOST, port=config.IMAP_PORT, ssl=True, ssl_context=_ssl(), timeout=30)
-    except OSError as e:
+    except (OSError, IMAPClientError) as e:   # includes "BYE Server shutting down" during a restart
         raise MailError(f"Can't reach the mail server: {e}") from None
     try:
         try:
