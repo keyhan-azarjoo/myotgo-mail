@@ -157,12 +157,7 @@ fi
 # ---------- start ------------------------------------------------------------------------------
 bold "4/6  Starting the mail server and the console"
 scripts/apply.sh
-info "waiting for the services"
-for i in $(seq 1 90); do
-  docker exec mailserver supervisorctl status postfix 2>/dev/null | grep -q RUNNING &&
-    docker exec mailapp python -c "import urllib.request,ssl;urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=ssl._create_unverified_context(),timeout=3)" 2>/dev/null && break
-  sleep 2
-done
+# (apply.sh already waited for the console; the mail server starts once the first mailbox exists)
 
 # ---------- first mailboxes and admin -------------------------------------------------------------
 bold "5/6  Creating your mailboxes and admin login"
@@ -196,6 +191,12 @@ if [[ $existing == 0 ]] || ! docker exec mailserver setup email list 2>/dev/null
 else
   info "mailboxes already exist: nothing created"
 fi
+
+info "waiting for the mail server to start"
+for _ in $(seq 1 60); do
+  [[ $(docker inspect mailserver --format '{{.State.Health.Status}}' 2>/dev/null) == healthy ]] && break
+  sleep 5
+done
 
 # ---------- DNS records and checks --------------------------------------------------------------
 bold "6/6  DNS records to add at your domain provider"
