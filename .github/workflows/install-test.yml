@@ -28,7 +28,7 @@ jobs:
           mkdir -p zap && chmod 777 zap
           sudo docker run --rm --network host --add-host "mx.example.test:$ip" -v "$PWD/zap:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t https://mx.example.test/login -I -r zap-report.html
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: zap-report
