@@ -17,6 +17,7 @@ fi
 
 sed -e "s/SERVER_IP/$SERVER_IP/" -e "s#TRUSTED_IPS#${TRUSTED_IPS:-}#" config/fail2ban-jail.cf > data/config/fail2ban-jail.cf
 cp config/postfix-main.cf data/config/postfix-main.cf
+scripts/split.sh
 
 if command -v ufw >/dev/null; then
   for p in 25 443 465 587 993; do ufw allow "$p/tcp" >/dev/null; done
@@ -28,6 +29,10 @@ here=$(pwd)
 cat > /etc/cron.d/mailserver-cert <<CRON
 # Renew the mail server certificate (cert.sh restarts the services only when it changed)
 17 4 * * 1 root cd '$here' && scripts/cert.sh >> /var/log/mailserver-cert.log 2>&1
+CRON
+cat > /etc/cron.d/mailserver-split <<CRON
+# Mailboxes added in the console: addresses without one still go to SHARED_DOMAIN_HOST
+*/10 * * * * root cd '$here' && scripts/split.sh >> /var/log/mailserver-split.log 2>&1
 CRON
 cat > /etc/cron.d/mailserver-backup <<CRON
 # Nightly copy of the mail data, last 7 kept in /var/backups/mailserver

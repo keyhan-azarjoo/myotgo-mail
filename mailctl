@@ -55,6 +55,8 @@ newpass() { python3 -c 'import secrets,string;a=string.ascii_letters+string.digi
 save_pass() { mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"; (umask 077; printf '%s\n' "$2" > "$SECRETS_DIR/$1.txt"); }
 
 cmd=${1:-help}; [[ $# -gt 0 ]] && shift
+# (Mailboxes and aliases changed: who's handed on to SHARED_DOMAIN_HOST follows.)
+[[ $cmd =~ ^(add|del|alias|unalias)$ ]] && trap 'scripts/split.sh' EXIT
 case "$cmd" in
   help|-h|--help) usage ;;
   add|passwd)

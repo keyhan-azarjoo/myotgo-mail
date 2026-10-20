@@ -2,3 +2,7 @@
 # Most small servers have no working IPv6 for mail, so only deliver over IPv4.
 # Remove this line if your server has IPv6 with a reverse DNS entry.
 inet_protocols = ipv4
+
+# Addresses of the domain with no mailbox here, when its other mailboxes are elsewhere
+# (SHARED_DOMAIN_HOST in .env; scripts/split.sh writes this file).
+transport_maps = pcre:/tmp/docker-mailserver/postfix-transport.pcre

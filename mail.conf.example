@@ -47,5 +47,9 @@ DKIM_SELECTOR=mail
 # They're never banned by fail2ban; they still have to sign in with a mailbox password.
 TRUSTED_IPS=
 
+# Your domain's other mailboxes live at another provider (its MX host, e.g. mx.zoho.eu): mail sent
+# from here to an address with no mailbox here goes there. Empty: such mail is refused.
+SHARED_DOMAIN_HOST=
+
 # Addresses that forward to the first mailbox you create (comma separated, optional)
 DEFAULT_ALIASES=postmaster,abuse
